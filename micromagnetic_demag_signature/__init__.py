@@ -1,1 +1,1 @@
-from microds import MicroDemagSignature
+from .microds import MicroDemagSignature
