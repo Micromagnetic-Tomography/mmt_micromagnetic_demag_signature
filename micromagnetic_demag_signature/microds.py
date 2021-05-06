@@ -132,7 +132,7 @@ class MicroDemagSignature(object):
 
         self.mag_data = np.loadtxt(self.mag_vbox_file, skiprows=1, ndmin=2)
         # Scale spatial data:
-        self.mag_data[:, :3] *= nm
+        self.mag_data[:, :3] *= µm
         self.mag_data[:, 6] *= (µm ** 3)
 
         self.dip_volumes = self.mag_data[:, 6]
