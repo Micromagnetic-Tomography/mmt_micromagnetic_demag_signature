@@ -1,13 +1,15 @@
 import numpy as np
 from pathlib import Path
 import numba
+from .clib import mds_clib
 
 
 nm = 1e-9
 µm = 1e-6
 
 
-@numba.jit(nopython=True)
+# @numba.jit(nopython=True)
+@numba.njit(parallel=True)
 def dipole_Bz(dip_r, dip_m, Sx_range, Sy_range, Sheight, Bz_grid):
     """
     Compute the z-component of the dipole field at the pos_r position(s), from
@@ -150,10 +152,17 @@ class MicroDemagSignature(object):
 
         self.Bz_grid = np.zeros((self.Ny, self.Nx), dtype=np.float64)
 
-    def compute_scan_signal(self):
+    def compute_scan_signal(self, method='numba'):
         """
         """
         # print(self.dip_moments.shape)
-        dipole_Bz(self.r, self.dip_moments, self.Sx, self.Sy, self.scan_height,
-                  self.Bz_grid)
-
+        if method == 'numba':
+            dipole_Bz(self.r, self.dip_moments, self.Sx, self.Sy,
+                      self.scan_height, self.Bz_grid)
+        elif method == 'cython':
+            r = self.r.ravel()
+            m = self.dip_moments.ravel()
+            mds_clib.dipole_bz_field_C(r, m, self.dip_moments.shape[0],
+                                       self.Sx, self.Sy,
+                                       self.Sx.shape[0], self.Sy.shape[0],
+                                       self.scan_height, self.Bz_grid)
