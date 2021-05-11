@@ -1,6 +1,32 @@
 #include<stdio.h>
 #include<math.h>
 
+/* C function to compute the field from a cluster of dipole sources at a scan
+ * signal surface
+ *
+ * Parameters
+ * ----------
+ * dip_r
+ *     array with the dipole positions in order: x0 y0 z0 x1 y1 z1 ...
+ *     The length of the array is `3 * n_dip`
+ * dip_m
+ *     array with dipole moments in same order than dip_r
+ * n_dip
+ *     number of dipole sources
+ * Sx_range, Sy_range
+ *     arrays with scan signal grid x and y positions
+ * n_Sx, n_Sy
+ *     number of grid positions in x and y directions
+ * Sheight
+ *     scan height
+ * Bz_grid
+ *     array with the scan grid positions. The size of this array is
+ *     `n_Sx * n_Sy`. x direction is for columns and y direction is for rows,
+ *     so it is filled by columns first (see code)
+ *     Cython: in cython we pass a 2D array but it is flattened in this code
+ *     assuming C order for the array entries
+ *
+ */
 
 void dipolar_field_C(double * dip_r, double * dip_m, unsigned long n_dip,
                      double * Sx_range, double * Sy_range,
@@ -12,8 +38,6 @@ void dipolar_field_C(double * dip_r, double * dip_m, unsigned long n_dip,
     #pragma omp parallel for collapse(2)
     for (unsigned long j = 0; j < n_Sy; ++j) {
         for (unsigned long i = 0; i < n_Sx; ++i) {
-
-            printf("i = %ld  j = %ld  bz_idx = %ld\n", i, j, n_Sx * j + i);
 
             double pos_r[3];
             pos_r[0] = Sx_range[i];
