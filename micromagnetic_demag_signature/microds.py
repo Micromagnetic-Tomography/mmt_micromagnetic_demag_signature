@@ -118,13 +118,25 @@ class MicroDemagSignature(object):
         # print('Mat params:', self.material_parameters)
         self.Ms = mat_params[1]
 
-    def read_input_files(self, Ms=None):
+    def read_input_files(self, 
+                         Ms=None,
+                         origin_to_geom_center=False):
         """
+        Parameters
+        ----------
+        Ms
+            If None, the magnetization is computed using the energy log file
+            specified in the main class. If Ms is passed or self.Ms is
+            specified, use the corresponding value
+        origin_to_geom_center
+            If True, all coordinates of the vbox file are shifted with respect
+            to the geometric center of the system, which is computed using all
+            coordinates and volumes from the file
         """
 
         if self.energy_log_file:
             self._read_magnetic_params(self.energy_log_file)
-        elif Ms:
+        elif Ms or self.Ms:
             self.Ms = Ms
 
         if self.Ms is None:
@@ -143,6 +155,14 @@ class MicroDemagSignature(object):
         self.x, self.y, self.z = self.mag_data[:, :3].T
         self.r = self.mag_data[:, :3]
         self.mx, self.my, self.mz = self.mag_data[:, 3:6].T
+
+        # Shift positions wrt to the geometric centre if True
+        if origin_to_geom_center:
+            geom_center = self.r * self.dip_volumes[:, np.newaxis]
+            geom_center = geom_center.sum(axis=0)
+            geom_center = geom_center / self.dip_volumes.sum()
+
+            np.subtract(self.r, geom_center, out=self.r)
 
         # self.dip_moments = self.Ms * self.dip_volumes
         # # This requires self.dip_moments to have 3 columns :/ so it fails:
