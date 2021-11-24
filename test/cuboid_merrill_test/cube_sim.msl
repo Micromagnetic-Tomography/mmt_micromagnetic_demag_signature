@@ -1,0 +1,25 @@
+! MERRILL 1.6
+! Simulation of a 50 nm side cube
+
+Set Ms 4.8e5
+Set Aex 13.349e-12
+
+ReadMesh 1 cube_50x50x50_gmsh_NOMAG.tec FileType = tecplot
+
+Uniform Magnetization 1.0 1.0 -1.0
+
+! ConjugateGradient
+! Set MaxEnergyEvaluations 1
+! Set ExchangeCalculator 1
+
+EnergyLog cube_sim_energy
+
+! Initial values
+External Field Strength 0.0 mT
+External Field Direction 0.0 0.0 1.0
+
+! Minimize
+WriteMagnetization cube_sim_magnetisation
+WriteBoxData cube_sim_magnetisation_volume
+
+END
