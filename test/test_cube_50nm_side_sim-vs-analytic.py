@@ -39,22 +39,25 @@ def test_cube_50nm_merrill_vs_analytic():
 
     # -----------------------------------------------------------------------------
 
-    # Analytic solution
-    analytic_sol = np.load('analytical_cuboid_code/' +
+    # Analytic solution in µT units
+    analytic_sol = np.load(
+        'analytical_cuboid_code/' +
         'cuboid_50nm_centre-at_-35nm_scan-grid_3microm_m_11-1_Bz.npy')
 
     # -----------------------------------------------------------------------------
     # Relative error
     err = np.linalg.norm(analytic_sol - demag_signal.Bz_grid * 1e6, ord='fro')
-    err = err / np.linalg.norm(analytic_sol, ord='fro')
+    relerr = err / np.linalg.norm(analytic_sol, ord='fro')
 
     # Norm of the simulation with the analytical Bz matrix should be less than:
-    assert err < 1e-4
+    assert relerr < 1e-4
 
-    print('Max MERRILL   :', np.abs(demag_signal.Bz_grid).max() * 1e6)
-    print('Max Analytic  :', np.abs(analytic_sol).max())
-    print('Max difference:', np.abs(analytic_sol -
-                                    demag_signal.Bz_grid * 1e6).max())
+    print('Max MERRILL (µT)   :', np.abs(demag_signal.Bz_grid).max() * 1e6)
+    print('Max Analytic (µT)  :', np.abs(analytic_sol).max())
+    print('Max difference (µT):', np.abs(analytic_sol -
+                                         demag_signal.Bz_grid * 1e6).max())
+    print('Error Diff (µT)    :', err)
+    print('Rel Error Diff %   :', relerr)
 
 
 if __name__ == "__main__":
