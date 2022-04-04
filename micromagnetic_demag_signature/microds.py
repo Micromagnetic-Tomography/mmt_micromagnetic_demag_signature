@@ -122,6 +122,7 @@ class MicroDemagSignature(object):
         direction. If `scan_spacing` is not dividing the limits exactly by an
         integer number, then the scan grid limits are approximated. Check the
         `Sx_range` and `Sy_range` variables to check this.
+
         """
 
         self.scan_limits = scan_limits
@@ -146,6 +147,7 @@ class MicroDemagSignature(object):
         Reads the saturation magnetization value from the log file of a MERRILL
         simulation.
         TODO: Might require to check MERRILL keeps the log file format intact
+
         """
         line = ''
         with open(log_file, 'r') as f:
@@ -162,7 +164,8 @@ class MicroDemagSignature(object):
 
     def read_input_files(self,
                          Ms=None,
-                         origin_to_geom_center=False):
+                         origin_to_geom_center=False,
+                         vbox_file_delimiter=None):
         """
         Parameters
         ----------
@@ -174,6 +177,12 @@ class MicroDemagSignature(object):
             If True, all coordinates of the vbox file are shifted with respect
             to the geometric center of the system, which is computed using all
             coordinates and volumes from the file
+        vbox_file_delimiter
+            The delimiter for the vbox file from MERRILL passed to the
+            `loadtxt` function. Prior to commit starting with hash 3aaf7f7
+            (30/07/2021) the delimiter was whitespace, so the default option is
+            `None`. Newer MERRILL versions use CSV format, so a comma `,` is
+            required
         """
 
         if self.energy_log_file:
@@ -187,7 +196,8 @@ class MicroDemagSignature(object):
                              'the constructor')
 
         # Read the vbox file: TODO: we can use a faster method for large files
-        self.mag_data = np.loadtxt(self.mag_vbox_file, skiprows=1, ndmin=2)
+        self.mag_data = np.loadtxt(self.mag_vbox_file, skiprows=1, ndmin=2,
+                                   delimiter=vbox_file_delimiter)
         # Scale spatial data:
         self.mag_data[:, :3] *= µm
         self.mag_data[:, 6] *= (µm ** 3)
@@ -225,6 +235,7 @@ class MicroDemagSignature(object):
             Specify `numba` or `cython` for the calculations. The C method is
             parallelized with OpenMP. Results are saved in the `self.Bz_grid`
             array.
+
         """
         # print(self.dip_moments.shape)
         if method == 'numba':
