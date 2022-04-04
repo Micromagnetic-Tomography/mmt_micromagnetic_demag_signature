@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.6211355.svg)](https://doi.org/10.5281/zenodo.6211355)
+
 # Micromagnetic Demag Signature
 
 This library allows to calculate the demagnetizing field signature of a
