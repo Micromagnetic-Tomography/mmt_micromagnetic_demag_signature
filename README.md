@@ -10,7 +10,8 @@ grain onto a two dimensional surface. The grain is modelled micromagnetically
 using the MERRILL code for the simulation of magnetic samples using finite
 element discretization.
 
-This library is developed by the ![Mimatom / MMT](https://mimatom.org/) project.
+This library is developed as part of the ![Mimatom / MMT](https://mimatom.org/)
+project.
 
 ## Theory
 
