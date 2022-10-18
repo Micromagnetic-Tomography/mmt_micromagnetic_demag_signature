@@ -1,7 +1,5 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.6211355.svg)](https://doi.org/10.5281/zenodo.6211355)
-![CC BY-NC-SA 4.0][cc-by-nc-sa-shield]
-
-[cc-by-nc-sa-shield]: https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 # MMT Numerical Libraries: Micromagnetic Demag Signature
 
@@ -38,7 +36,7 @@ If you find this library useful please cite us (you might need LaTeX's
       author       = {Cortés-Ortuño, David and Fabian, Karl and de Groot, Lennart V.},
       title        = {{MMT Numerical Libraries: Micromagnetic Demag Signature}},
       publisher    = {Zenodo},
-      note         = {Github: \url{https://github.com/Micromagnetic-Tomography/micromagnetic_demag_signature}},
+      note         = {Github: \url{https://github.com/Micromagnetic-Tomography/mmt_micromagnetic_demag_signature}},
       year         = {2022},
       doi          = {10.5281/zenodo.6211355},
       url          = {https://doi.org/10.5281/zenodo.6211355},
