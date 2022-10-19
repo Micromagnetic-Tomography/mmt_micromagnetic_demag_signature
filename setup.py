@@ -11,9 +11,9 @@ import numpy
 com_args = ['-std=c99', '-O3', '-fopenmp']
 link_args = ['-fopenmp']
 extensions = [
-    Extension("micromagnetic_demag_signature.clib.mds_clib",
-              ["micromagnetic_demag_signature/clib/mds_clib.pyx",
-               "micromagnetic_demag_signature/clib/clib.c"],
+    Extension("mmt_micromagnetic_demag_signature.clib.mds_clib",
+              ["mmt_micromagnetic_demag_signature/clib/mds_clib.pyx",
+               "mmt_micromagnetic_demag_signature/clib/clib.c"],
               extra_compile_args=com_args,
               extra_link_args=link_args,
               include_dirs=[numpy.get_include()]
@@ -27,7 +27,7 @@ with open('README.md') as f:
 
 setuptools.setup(
     # setup_requires=['cython'],  # not working (see the link at top)
-    name='micromagnetic_demag_signature',
+    name='mmt_micromagnetic_demag_signature',
     version='0.1',
     description=('Python lib to calculate the signature of the demag field '
                  'from a micromagnetic model of a grain, onto a 2D surface'),
