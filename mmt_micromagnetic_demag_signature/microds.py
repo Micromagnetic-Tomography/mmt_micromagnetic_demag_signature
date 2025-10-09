@@ -10,7 +10,7 @@ nm = 1e-9
 
 # @numba.jit(nopython=True)
 @numba.njit(parallel=True)
-def dipole_Bz(dip_r, dip_m, Sx_range, Sy_range, Sheight, Bz_grid):
+def dipole_B(dip_r, dip_m, Sx_range, Sy_range, Sheight, B_grid, dir_vector):
     """
     Compute the z-component of the dipole field at the node position(s) of a
     scan grid, from a group of particles located at the dip_r dipole_positions,
@@ -33,11 +33,13 @@ def dipole_Bz(dip_r, dip_m, Sx_range, Sy_range, Sheight, Bz_grid):
         P-array with coordinates of measurement point (m) in the y-direction
     Sheight
         Height or z-position of the scan surface
-    Bz_grid
+    B_grid
         M x P array to be populated with the dipole field values
+    dir_vector
+        Normalized direction vector
     """
-    if Bz_grid.shape[0] * Bz_grid.shape[1] != Sx_range.shape[0] * Sy_range.shape[0]:
-        raise Exception('Bz grid array with wrong dimensions')
+    if B_grid.shape[0] * B_grid.shape[1] != Sx_range.shape[0] * Sy_range.shape[0]:
+        raise Exception("Bz grid array with wrong dimensions")
 
     pos_r = np.zeros(3)
     pos_r[2] = Sheight
@@ -49,31 +51,33 @@ def dipole_Bz(dip_r, dip_m, Sx_range, Sy_range, Sheight, Bz_grid):
 
             x, y, z = r[:, 0], r[:, 1], r[:, 2]
 
-            rho2 = np.sum(r ** 2, axis=1)
+            rho2 = np.sum(r**2, axis=1)
             rho = np.sqrt(rho2)
+            rho5 = rho2 * rho2 * rho
 
             mx, my, mz = dip_m[:, 0], dip_m[:, 1], dip_m[:, 2]
             m_dot_r = mx * x + my * y + mz * z
-            f = 3e-7 * z * m_dot_r / (rho2 * rho2 * rho)
-            g = -1e-7 * mz / (rho2 * rho)
 
-            # Only return Bz
-            res = f + g
+            Bx = (3e-7 * x * m_dot_r / rho5) - (1e-7 * mx / (rho2 * rho))
+            By = (3e-7 * y * m_dot_r / rho5) - (1e-7 * my / (rho2 * rho))
+            Bz = (3e-7 * z * m_dot_r / rho5) - (1e-7 * mz / (rho2 * rho))
 
-            Bz_grid[j, i] = np.sum(res)
+            B_grid[j, i] = np.sum(
+                Bx * dir_vector[0] + By * dir_vector[1] + Bz * dir_vector[2]
+            )
 
     return None
 
 
 class MicroDemagSignature(object):
-
-    def __init__(self,
-                 scan_limits,
-                 scan_spacing,
-                 scan_height,
-                 merrill_mag_vbox_file,
-                 merrill_energy_log_file=None
-                 ):
+    def __init__(
+        self,
+        scan_limits,
+        scan_spacing,
+        scan_height,
+        merrill_mag_vbox_file,
+        merrill_energy_log_file=None,
+    ):
         """
         This class allows to calculate the dipolar signal from the
         magnetization vectors of a finite element micromagnetic system
@@ -149,23 +153,21 @@ class MicroDemagSignature(object):
         TODO: Might require to check MERRILL keeps the log file format intact
 
         """
-        line = ''
-        with open(log_file, 'r') as f:
-            while not line.startswith('Material'):
+        line = ""
+        with open(log_file, "r") as f:
+            while not line.startswith("Material"):
                 line = f.readline()
             self.headers = f.readline().strip().split()
-            mat_params = np.array(f.readline().strip().split(),
-                                  dtype=np.float64)
+            mat_params = np.array(f.readline().strip().split(), dtype=np.float64)
             self.material_parameters = {}
         # for i, mp in enumerate(headers):
         #     self.material_parameters[mp] = mat_params[i]
         # print('Mat params:', self.material_parameters)
         self.Ms = mat_params[1]
 
-    def read_input_files(self,
-                         Ms=None,
-                         origin_to_geom_center=False,
-                         vbox_file_delimiter=None):
+    def read_input_files(
+        self, Ms=None, origin_to_geom_center=False, vbox_file_delimiter=None
+    ):
         """
         Parameters
         ----------
@@ -191,16 +193,19 @@ class MicroDemagSignature(object):
             self.Ms = Ms
 
         if self.Ms is None:
-            raise ValueError('Specify a value for the saturation by either '
-                             'setting the Ms argument or via a log file in '
-                             'the constructor')
+            raise ValueError(
+                "Specify a value for the saturation by either "
+                "setting the Ms argument or via a log file in "
+                "the constructor"
+            )
 
         # Read the vbox file: TODO: we can use a faster method for large files
-        self.mag_data = np.loadtxt(self.mag_vbox_file, skiprows=1, ndmin=2,
-                                   delimiter=vbox_file_delimiter)
+        self.mag_data = np.loadtxt(
+            self.mag_vbox_file, skiprows=1, ndmin=2, delimiter=vbox_file_delimiter
+        )
         # Scale spatial data:
         self.mag_data[:, :3] *= µm
-        self.mag_data[:, 6] *= (µm ** 3)
+        self.mag_data[:, 6] *= µm**3
 
         self.dip_volumes = self.mag_data[:, 6]
         # "Unpacking" occurs in the 1st dimension (row) so we transpose
@@ -221,11 +226,13 @@ class MicroDemagSignature(object):
         # # This requires self.dip_moments to have 3 columns :/ so it fails:
         # np.multiply(self.dip_moments[:, np.newaxis], self.mag_data[:, 3:6],
         #             out=self.dip_moments)
-        self.dip_moments = self.Ms * self.dip_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
+        self.dip_moments = (
+            self.Ms * self.dip_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
+        )
 
-        self.Bz_grid = np.zeros((self.Ny, self.Nx), dtype=np.float64)
+        self.B_grid = np.zeros((self.Ny, self.Nx), dtype=np.float64)
 
-    def compute_scan_signal(self, method='numba'):
+    def compute_scan_signal(self, method="numba", direction_vector=(0.0, 0.0, 1.0)):
         """
         Computes the dipolar signal at the scan surface
 
@@ -233,18 +240,41 @@ class MicroDemagSignature(object):
         ----------
         method
             Specify `numba` or `cython` for the calculations. The C method is
-            parallelized with OpenMP. Results are saved in the `self.Bz_grid`
+            parallelized with OpenMP. Results are saved in the `self.B_grid`
             array.
-
+        direction_vector
+            Vector with the direction of the field to be computed. By default, the
+            z-component of the field is used.
         """
+        # Ensure normalized dir vector
+        dir_vector = np.array(direction_vector)
+        dv_norm = np.linalg.norm(dir_vector)
+        dir_vector = dir_vector / dv_norm
+
         # print(self.dip_moments.shape)
-        if method == 'numba':
-            dipole_Bz(self.r, self.dip_moments, self.Sx, self.Sy,
-                      self.scan_height, self.Bz_grid)
-        elif method == 'cython':
+        if method == "numba":
+            dipole_B(
+                self.r,
+                self.dip_moments,
+                self.Sx,
+                self.Sy,
+                self.scan_height,
+                self.B_grid,
+                dir_vector,
+            )
+
+        elif method == "cython":
             r = self.r.ravel()
             m = self.dip_moments.ravel()
-            mds_clib.dipole_bz_field_C(r, m, self.dip_moments.shape[0],
-                                       self.Sx, self.Sy,
-                                       self.Sx.shape[0], self.Sy.shape[0],
-                                       self.scan_height, self.Bz_grid)
+            mds_clib.dipole_bz_field_C(
+                r,
+                m,
+                self.dip_moments.shape[0],
+                self.Sx,
+                self.Sy,
+                self.Sx.shape[0],
+                self.Sy.shape[0],
+                self.scan_height,
+                self.B_grid,
+                dir_vector
+            )
