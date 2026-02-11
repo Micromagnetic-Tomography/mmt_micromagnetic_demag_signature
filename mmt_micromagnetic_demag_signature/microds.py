@@ -6,7 +6,9 @@ from .clib import mds_clib
 
 nm = 1e-9
 µm = 1e-6
-
+scale = {}
+scale['micrometer'] = µm
+scale['nanometer'] = nm
 
 # @numba.jit(nopython=True)
 @numba.njit(parallel=True)
@@ -75,7 +77,7 @@ class MicroDemagSignature(object):
         scan_limits,
         scan_spacing,
         scan_height,
-        merrill_mag_vbox_file,
+        mag_sim_file,
         merrill_energy_log_file=None,
     ):
         """
@@ -98,8 +100,8 @@ class MicroDemagSignature(object):
             directions (see Notes). Specified in meters
         scan_height
             Position of the scan grid in the z-direction. Specified in meters
-        merrill_mag_vbox_file
-            Path to a MERRILL's vbox output file with 7 columns:
+        mag_sim_file
+            Path to a magnetization output file from a simulation, e.g. MERRILL vbox file:
                 x y z mx my mz volume
             where the spatial data is scaled in µm
         merrill_energy_log_file (optional)
@@ -132,7 +134,7 @@ class MicroDemagSignature(object):
         self.scan_limits = scan_limits
         self.scan_spacing = scan_spacing
         self.scan_height = scan_height
-        self.mag_vbox_file = merrill_mag_vbox_file
+        self.mag_sim_file = mag_sim_file
         self.energy_log_file = merrill_energy_log_file
 
         self.Nx = round((scan_limits[1][0] - scan_limits[0][0]) / scan_spacing[0]) + 1
@@ -148,8 +150,7 @@ class MicroDemagSignature(object):
 
     def _read_magnetic_params(self, log_file):
         """
-        Reads the saturation magnetization value from the log file of a MERRILL
-        simulation.
+        Reads the saturation magnetization value from the log file of a MERRILL simulation.
         TODO: Might require to check MERRILL keeps the log file format intact
 
         """
@@ -165,10 +166,34 @@ class MicroDemagSignature(object):
         # print('Mat params:', self.material_parameters)
         self.Ms = mat_params[1]
 
-    def read_input_files(
-        self, Ms=None, origin_to_geom_center=False, vbox_file_delimiter=None
-    ):
+
+    def read_input_files(self, Ms=None, origin_to_geom_center=False,
+                         reader='merrill', **reader_kwargs):
+        if self.energy_log_file:
+            self._read_magnetic_params(self.energy_log_file)
+        elif Ms or self.Ms:
+            self.Ms = Ms
+
+        if self.Ms is None:
+            raise ValueError(
+                "Specify a value for the saturation by either "
+                "setting the Ms argument or via a log file in "
+                "the constructor"
+            )
+
+        match reader:
+            case 'merrill':
+                self.reader_merrill_vbox(self.Ms, origin_to_geom_center, **reader_kwargs)
+            case 'fd_micromagnetic':
+                self.reader_fd_micromagnetic(self.Ms, origin_to_geom_center, **reader_kwargs)
+
+
+        self.B_grid = np.zeros((self.Ny, self.Nx), dtype=np.float64)
+
+    def reader_merrill_vbox(self, Ms, origin_to_geom_center, vbox_file_delimiter=None) -> None:
         """
+        Reads a MERRILL vbox file with 7 columns: x y z mx my mz volumes
+
         Parameters
         ----------
         Ms
@@ -187,21 +212,9 @@ class MicroDemagSignature(object):
             required
         """
 
-        if self.energy_log_file:
-            self._read_magnetic_params(self.energy_log_file)
-        elif Ms or self.Ms:
-            self.Ms = Ms
-
-        if self.Ms is None:
-            raise ValueError(
-                "Specify a value for the saturation by either "
-                "setting the Ms argument or via a log file in "
-                "the constructor"
-            )
-
         # Read the vbox file: TODO: we can use a faster method for large files
         self.mag_data = np.loadtxt(
-            self.mag_vbox_file, skiprows=1, ndmin=2, delimiter=vbox_file_delimiter
+            self.mag_sim_file, skiprows=1, ndmin=2, delimiter=vbox_file_delimiter
         )
         # Scale spatial data:
         self.mag_data[:, :3] *= µm
@@ -227,10 +240,57 @@ class MicroDemagSignature(object):
         # np.multiply(self.dip_moments[:, np.newaxis], self.mag_data[:, 3:6],
         #             out=self.dip_moments)
         self.dip_moments = (
-            self.Ms * self.dip_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
+            Ms * self.dip_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
         )
 
-        self.B_grid = np.zeros((self.Ny, self.Nx), dtype=np.float64)
+
+    def reader_fd_micromagnetic_npy(self, Ms, origin_to_geom_center, delimiter=None, units='micrometer') -> None:
+        """
+        Reads a finite difference micromagnetic file with 6 columns: x y z mx my mz
+
+        Parameters
+        ----------
+        Ms
+            If None, the magnetization is computed using the energy log file
+            specified in the main class. If Ms is passed or self.Ms is
+            specified, use the corresponding value
+        origin_to_geom_center
+            If True, all coordinates of the vbox file are shifted with respect
+            to the geometric center of the system, which is computed using all
+            coordinates and volumes from the file
+        """
+        if self.mag_sim_file.endswith('npy'):
+
+        # Read the vbox file: TODO: we can use a faster method for large files
+        self.mag_data = np.loadtxt(
+            self.mag_sim_file, ndmin=2, delimiter=delimiter)
+        # Scale spatial data:
+        self.mag_data[:, :3] *= scale[units]
+        self.mag_data[:, 6] *= scale[units]**3
+
+        self.dip_volumes = self.mag_data[:, 6]
+        # "Unpacking" occurs in the 1st dimension (row) so we transpose
+        # The unpacking should generate mem views of the arrays
+        self.x, self.y, self.z = self.mag_data[:, :3].T
+        self.r = self.mag_data[:, :3]
+        self.mx, self.my, self.mz = self.mag_data[:, 3:6].T
+
+        # Shift positions wrt to the geometric centre if True
+        if origin_to_geom_center:
+            geom_center = self.r * self.dip_volumes[:, np.newaxis]
+            geom_center = geom_center.sum(axis=0)
+            geom_center = geom_center / self.dip_volumes.sum()
+
+            np.subtract(self.r, geom_center, out=self.r)
+
+        # self.dip_moments = self.Ms * self.dip_volumes
+        # # This requires self.dip_moments to have 3 columns :/ so it fails:
+        # np.multiply(self.dip_moments[:, np.newaxis], self.mag_data[:, 3:6],
+        #             out=self.dip_moments)
+        self.dip_moments = (
+            Ms * self.dip_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
+        )
+
 
     def compute_scan_signal(self, method="numba", direction_vector=(0.0, 0.0, 1.0)):
         """
