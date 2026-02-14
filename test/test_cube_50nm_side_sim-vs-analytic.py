@@ -65,5 +65,53 @@ def test_cube_50nm_merrill_vs_analytic():
     print("Rel Error Diff %   :", relerr)
 
 
+def test_cube_50nm_fdMicromagnetics_vs_analytic():
+    # Creating scan grid
+    scan_spacing = (10 * nm, 10 * nm)
+    scan_limits = np.array([[-1.5, -1.5], [1.5, 1.5]]) * µm
+    scan_height = 500 * nm
+
+    FILE_energy = Path("cuboid_merrill_test/cube_sim_energy.log")
+
+    # Notice that the cube in the MERRILL simulation is already centered
+    # at z = -35 nm
+    demag_signal = mds.MicroDemagSignature(
+        scan_limits,
+        scan_spacing,
+        scan_height,
+        "cuboid_fd_mm_test/cube_mumaxPlus_L_50nm_centerAt_-35nm_dxyz_2nm.npy",
+        FILE_energy,
+    )
+
+    demag_signal.read_input_files(Ms=4.8e5, origin_to_geom_center=True,  
+                                  dV=[2, 2, 2], n=[25, 25, 25],
+                                  reader='fd_micromagnetic')
+    demag_signal.compute_scan_signal(method="cython")
+
+    # -----------------------------------------------------------------------------
+
+    # Analytic solution in µT units
+    analytic_sol = np.load(
+        "analytical_cuboid_code/"
+        + "cuboid_50nm_centre-at_-35nm_scan-grid_3microm_m_11-1_Bz.npy"
+    )
+
+    # -----------------------------------------------------------------------------
+    # Relative error
+    err = np.linalg.norm(analytic_sol - demag_signal.B_grid * 1e6, ord="fro")
+    relerr = err / np.linalg.norm(analytic_sol, ord="fro")
+
+    # Norm of the simulation with the analytical Bz matrix should be less than:
+    assert relerr < 1e-4
+
+    print("Max MERRILL (µT)   :", np.abs(demag_signal.B_grid).max() * 1e6)
+    print("Max Analytic (µT)  :", np.abs(analytic_sol).max())
+    print(
+        "Max difference (µT):", np.abs(analytic_sol - demag_signal.B_grid * 1e6).max()
+    )
+    print("Error Diff (µT)    :", err)
+    print("Rel Error Diff %   :", relerr)
+
+
 if __name__ == "__main__":
     test_cube_50nm_merrill_vs_analytic()

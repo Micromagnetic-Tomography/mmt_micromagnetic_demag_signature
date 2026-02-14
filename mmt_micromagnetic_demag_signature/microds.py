@@ -250,9 +250,9 @@ class MicroDemagSignature(object):
 
     def reader_fd_micromagnetic(self,
                                 Ms: float,
+                                origin_to_geom_center: bool,
                                 dV: list,
                                 n: list,
-                                origin_to_geom_center: bool,
                                 delimiter: Optional[str] = None, 
                                 units: str = 'micrometer') -> None:
         """

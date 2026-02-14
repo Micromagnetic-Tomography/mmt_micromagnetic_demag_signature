@@ -18,7 +18,7 @@ EnergyLog cube_sim_energy
 External Field Strength 0.0 mT
 External Field Direction 0.0 0.0 1.0
 
-! Minimize
+! Save state without minimization
 WriteMagnetization cube_sim_magnetisation
 WriteBoxData cube_sim_magnetisation_volume
 
