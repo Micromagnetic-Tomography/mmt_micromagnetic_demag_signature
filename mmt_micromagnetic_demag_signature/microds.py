@@ -76,19 +76,21 @@ def dipole_B(dip_r, dip_m, Sx_range, Sy_range, Sheight, B_grid, dir_vector):
 class MicroDemagSignature(object):
     def __init__(
         self,
-        scan_limits,
-        scan_spacing,
-        scan_height,
-        mm_sim_file,
-        merrill_energy_log_file=None,
+        scan_limits: list[list[2], list[2]],
+        scan_spacing: list[2] | tuple[2],
+        scan_height: float,
     ):
         """
         This class allows to calculate the dipolar signal from the
         magnetization vectors of a finite element micromagnetic system
-        simulated with the MERRILL code. The dipolar signal is recorded in a
+        simulated with a micromagnetic code. The dipolar signal is recorded in a
         rectangular scan grid that is defined when instatiating this class.
         Information of the micromagnetic model is defined in a vbox file
         produced by MERRILL.
+        The readers for different simulation code outputs, generate the common attributes:
+            self.r
+            self.dip_moments
+        Other attributes are specific to the reader used.
 
         Parameters
         ----------
@@ -102,13 +104,6 @@ class MicroDemagSignature(object):
             directions (see Notes). Specified in meters
         scan_height
             Position of the scan grid in the z-direction. Specified in meters
-        mm_sim_file
-            Path to a magnetization output file from a simulation, e.g. MERRILL vbox file:
-                x y z mx my mz volume
-            where the spatial data is scaled in µm
-        merrill_energy_log_file (optional)
-            Path to the MERRILL energy file from which magnetic paramters are
-            read in the header
 
         Notes
         -----
@@ -136,11 +131,6 @@ class MicroDemagSignature(object):
         self.scan_limits = scan_limits
         self.scan_spacing = scan_spacing
         self.scan_height = scan_height
-        if isinstance(mm_sim_file, (str, Path)):
-            self.mm_sim_file = mm_sim_file
-        else:
-            raise TypeError('mm_sim_file must be a str or Path')
-        self.energy_log_file = merrill_energy_log_file
 
         self.Nx = round((scan_limits[1][0] - scan_limits[0][0]) / scan_spacing[0]) + 1
         self.Ny = round((scan_limits[1][1] - scan_limits[0][1]) / scan_spacing[1]) + 1
@@ -152,12 +142,12 @@ class MicroDemagSignature(object):
         #     (self.Sx, self.Sy, np.ones_like(self.Sx) * scan_height), axis=2)
 
         self.Ms = None
+        self.B_grid = np.zeros((self.Ny, self.Nx), dtype=np.float64)
 
     def _read_magnetic_params(self, log_file):
         """
         Reads the saturation magnetization value from the log file of a MERRILL simulation.
         TODO: Might require to check MERRILL keeps the log file format intact
-
         """
         line = ""
         with open(log_file, "r") as f:
@@ -171,37 +161,28 @@ class MicroDemagSignature(object):
         # print('Mat params:', self.material_parameters)
         self.Ms = mat_params[1]
 
-    def read_input_files(self, Ms=None, origin_to_geom_center=False,
-                         reader='merrill', **reader_kwargs):
-        if self.energy_log_file:
-            self._read_magnetic_params(self.energy_log_file)
-        elif Ms or self.Ms:
-            self.Ms = Ms
-
-        if self.Ms is None:
-            raise ValueError(
-                "Specify a value for the saturation by either "
-                "setting the Ms argument or via a log file in "
-                "the constructor"
-            )
-
-        match reader:
-            case 'merrill':
-                self.reader_merrill_vbox(self.Ms, origin_to_geom_center, **reader_kwargs)
-            case 'fd_micromagnetic':
-                self.reader_fd_micromagnetic(self.Ms, origin_to_geom_center, **reader_kwargs)
-
-        self.B_grid = np.zeros((self.Ny, self.Nx), dtype=np.float64)
-
-    def reader_merrill_vbox(self, Ms, origin_to_geom_center, vbox_file_delimiter=None) -> None:
+    def reader_merrill_vbox(self,
+                            mm_sim_file: str | Path,
+                            energy_log_file: Optional(str) | Path = None,
+                            Ms: Optional[float] = None,
+                            origin_to_geom_center: bool = False,
+                            vbox_file_delimiter=None
+                            ) -> None:
         """
         Reads a MERRILL vbox file with 7 columns: x y z mx my mz volumes
 
         Parameters
         ----------
+        mm_sim_file
+            Path to a magnetization output file from a MERRILL vbox file:
+                x y z mx my mz volume
+            where the spatial data is scaled in µm
+        merrill_energy_log_file (optional)
+            Path to the MERRILL energy file from which magnetic paramters are
+            read in the header
         Ms
             If None, the magnetization is computed using the energy log file
-            specified in the main class. If Ms is passed or self.Ms is
+            specified in the main class. If Ms is passed, or self.Ms is
             specified, use the corresponding value
         origin_to_geom_center
             If True, all coordinates of the vbox file are shifted with respect
@@ -214,11 +195,21 @@ class MicroDemagSignature(object):
             `None`. Newer MERRILL versions use CSV format, so a comma `,` is
             required
         """
+        mm_sim_file = Path(mm_sim_file)
+
+        if energy_log_file:
+            self._read_magnetic_params(energy_log_file)
+        elif Ms:
+            self.Ms = Ms
+
+        if self.Ms is None:
+            raise ValueError(
+                "Specify a value for the saturation by either setting the Ms argument or via"
+                " a log file in the constructor")
 
         # Read the vbox file: TODO: we can use a faster method for large files
         self.mag_data = np.loadtxt(
-            self.mm_sim_file, skiprows=1, ndmin=2, delimiter=vbox_file_delimiter
-        )
+            mm_sim_file, skiprows=1, ndmin=2, delimiter=vbox_file_delimiter)
         # Scale spatial data:
         self.mag_data[:, :3] *= µm
         self.mag_data[:, 6] *= µm**3
@@ -243,10 +234,11 @@ class MicroDemagSignature(object):
         # np.multiply(self.dip_moments[:, np.newaxis], self.mag_data[:, 3:6],
         #             out=self.dip_moments)
         self.dip_moments = (
-            Ms * self.dip_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
+            self.Ms * self.dip_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
         )
 
     def reader_fd_micromagnetic(self,
+                                mm_sim_file: str | Path,
                                 Ms: float,
                                 origin_to_geom_center: bool,
                                 dV: list[3],
@@ -283,10 +275,11 @@ class MicroDemagSignature(object):
         """
         # if str(self.mm_sim_file).endswith('npy'):  # or use Path's suffix
 
-        if str(self.mm_sim_file).endswith(('txt', 'dat')):  # or use Path's suffix
-            self.mag_data = np.loadtxt(self.mm_sim_file, ndmin=2, delimiter=delimiter)
+        mm_sim_file = Path(mm_sim_file)
+        if mm_sim_file.suffix in ['.txt', '.dat']:
+            self.mag_data = np.loadtxt(mm_sim_file, ndmin=2, delimiter=delimiter)
         else:
-            self.mag_data = np.load(self.mm_sim_file)  # numpy handles io errors
+            self.mag_data = np.load(mm_sim_file)  # numpy handles io errors
 
         # Translate positions if specified
         if traslation_vector:

@@ -14,6 +14,7 @@ def test_cube_50nm_merrill_vs_analytic():
     # M = np.array([1, 1, -1.])
     # print(np.linalg.norm(M))
     # print(M / np.linalg.norm(M))
+    print('** Testing MERRILL finite element simulation file **')
 
     # MERRILL Sim -----------------------------------------------------------------
 
@@ -25,19 +26,15 @@ def test_cube_50nm_merrill_vs_analytic():
     # Get the absolute path of the script's directory
     script_dir = Path(__file__).resolve().parent
     FILE_energy = script_dir / "cuboid_merrill_test/cube_sim_energy.log"
+    FILE_sim = script_dir / "cuboid_merrill_test/cube_sim_magnetisation_volume.vbox"
 
     # Notice that the cube in the MERRILL simulation is already centered
     # at z = -35 nm
-    demag_signal = mds.MicroDemagSignature(
-        scan_limits,
-        scan_spacing,
-        scan_height,
-        script_dir / "cuboid_merrill_test/cube_sim_magnetisation_volume.vbox",
-        FILE_energy,
-    )
-
-    demag_signal.read_input_files()
-    print(demag_signal.dip_moments)
+    demag_signal = mds.MicroDemagSignature(scan_limits, scan_spacing, scan_height)
+    demag_signal.reader_merrill_vbox(FILE_sim,
+                                     FILE_energy,
+                                     origin_to_geom_center=False
+                                     )
     demag_signal.compute_scan_signal(method="cython")
 
     # bz_grid = np.copy(demag_signal.Bz_grid)
@@ -68,6 +65,9 @@ def test_cube_50nm_merrill_vs_analytic():
 
 
 def test_cube_50nm_fdMicromagnetics_vs_analytic():
+
+    print('** Testing mumax+ finite difference simulation file **')
+
     # Creating scan grid
     scan_spacing = (10 * nm, 10 * nm)
     scan_limits = np.array([[-1.5, -1.5], [1.5, 1.5]]) * µm
@@ -78,20 +78,16 @@ def test_cube_50nm_fdMicromagnetics_vs_analytic():
 
     # Notice that the cube in the MERRILL simulation is already centered
     # at z = -35 nm
-    demag_signal = mds.MicroDemagSignature(
-        scan_limits,
-        scan_spacing,
-        scan_height,
-        script_dir / "cuboid_fd_mm_test/cube_mumaxPlus_L_50nm_centerAt_-35nm_dxyz_2nm.npy",
-        merrill_energy_log_file=None,
-    )
+    demag_signal = mds.MicroDemagSignature(scan_limits, scan_spacing, scan_height)
 
-    demag_signal.read_input_files(Ms=4.8e5, origin_to_geom_center=False,
-                                  dV=[2, 2, 2], n=[25, 25, 25],
-                                  reader='fd_micromagnetic',
-                                  units='nanometer'
-                                  )
-    print(demag_signal.dip_moments)
+    sim_file = script_dir / "cuboid_fd_mm_test/cube_mumaxPlus_L_50nm_centerAt_-35nm_dxyz_2nm.npy"
+    demag_signal.reader_fd_micromagnetic(sim_file,
+                                         Ms=4.8e5,
+                                         origin_to_geom_center=False,
+                                         dV=[2, 2, 2], n=[25, 25, 25],
+                                         units='nanometer',
+                                         traslation_vector=[0, 0, 0]
+                                         )
     demag_signal.compute_scan_signal(method="cython")
 
     # -----------------------------------------------------------------------------
@@ -120,4 +116,5 @@ def test_cube_50nm_fdMicromagnetics_vs_analytic():
 
 if __name__ == "__main__":
     test_cube_50nm_merrill_vs_analytic()
+    print('-' * 80 + '\n')
     test_cube_50nm_fdMicromagnetics_vs_analytic()
