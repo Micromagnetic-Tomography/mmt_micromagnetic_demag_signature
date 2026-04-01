@@ -22,7 +22,9 @@ def test_cube_50nm_merrill_vs_analytic():
     scan_limits = np.array([[-1.5, -1.5], [1.5, 1.5]]) * µm
     scan_height = 500 * nm
 
-    FILE_energy = Path("cuboid_merrill_test/cube_sim_energy.log")
+    # Get the absolute path of the script's directory
+    script_dir = Path(__file__).resolve().parent
+    FILE_energy = script_dir / "cuboid_merrill_test/cube_sim_energy.log"
 
     # Notice that the cube in the MERRILL simulation is already centered
     # at z = -35 nm
@@ -30,7 +32,7 @@ def test_cube_50nm_merrill_vs_analytic():
         scan_limits,
         scan_spacing,
         scan_height,
-        "cuboid_merrill_test/cube_sim_magnetisation_volume.vbox",
+        script_dir / "cuboid_merrill_test/cube_sim_magnetisation_volume.vbox",
         FILE_energy,
     )
 
@@ -44,8 +46,7 @@ def test_cube_50nm_merrill_vs_analytic():
 
     # Analytic solution in µT units
     analytic_sol = np.load(
-        "analytical_cuboid_code/"
-        + "cuboid_50nm_centre-at_-35nm_scan-grid_3microm_m_11-1_Bz.npy"
+        script_dir / "analytical_cuboid_code/cuboid_50nm_centre-at_-35nm_scan-grid_3microm_m_11-1_Bz.npy"
     )
 
     # -----------------------------------------------------------------------------
