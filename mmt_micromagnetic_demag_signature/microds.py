@@ -249,10 +249,12 @@ class MicroDemagSignature(object):
     def reader_fd_micromagnetic(self,
                                 Ms: float,
                                 origin_to_geom_center: bool,
-                                dV: list,
-                                n: list,
+                                dV: list[3],
+                                n: list[3],
                                 delimiter: Optional[str] = None,
-                                units: str = 'micrometer') -> None:
+                                units: str = 'nanometer',
+                                traslation_vector: Optional[list[3]] = None
+                                ) -> None:
         """
         Reads a finite difference micromagnetic file with 6 columns: x y z mx my mz
 
@@ -266,6 +268,18 @@ class MicroDemagSignature(object):
             If True, all coordinates of the vbox file are shifted with respect
             to the geometric center of the system, which is computed using all
             coordinates and volumes from the file
+        dV
+            3-element list with the cell dimensions: dx, dy, dz
+            Used to compute volume
+        n
+            3-element list with the number of cells: nx, ny, nz
+        delimiter
+            For the text file containing the cell positions and magnetizations
+        units
+            Scale units of positions. Usually in nm in micromagnetic codes
+        traslation_vector
+            3-element list with translation of coordinates (same scale units
+            than in the file)
         """
         # if str(self.mm_sim_file).endswith('npy'):  # or use Path's suffix
 
@@ -273,6 +287,10 @@ class MicroDemagSignature(object):
             self.mag_data = np.loadtxt(self.mm_sim_file, ndmin=2, delimiter=delimiter)
         else:
             self.mag_data = np.load(self.mm_sim_file)  # numpy handles io errors
+
+        # Translate positions if specified
+        if traslation_vector:
+            self.mag_data[:, :3] -= np.array(traslation_vector)
 
         # Scale spatial data:
         self.mag_data[:, :3] *= scale[units]
@@ -292,10 +310,7 @@ class MicroDemagSignature(object):
 
             np.subtract(self.r, geom_center, out=self.r)
 
-        # print(f'{geom_center=}')
-        print(self.r)
-
-        self.dip_moments = Ms * (self.fd_cell_volume * scale[units]**3) * self.mag_data[:, 3:6]
+        self.dip_moments = Ms * self.fd_cell_volume * self.mag_data[:, 3:6]
 
     def compute_scan_signal(self, method="numba", direction_vector=(0.0, 0.0, 1.0)):
         """
