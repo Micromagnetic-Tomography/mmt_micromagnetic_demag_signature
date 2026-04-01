@@ -11,6 +11,7 @@ scale = {}
 scale['micrometer'] = µm
 scale['nanometer'] = nm
 
+
 # @numba.jit(nopython=True)
 @numba.njit(parallel=True)
 def dipole_B(dip_r, dip_m, Sx_range, Sy_range, Sheight, B_grid, dir_vector):
@@ -78,7 +79,7 @@ class MicroDemagSignature(object):
         scan_limits,
         scan_spacing,
         scan_height,
-        mag_sim_file,
+        mm_sim_file,
         merrill_energy_log_file=None,
     ):
         """
@@ -101,7 +102,7 @@ class MicroDemagSignature(object):
             directions (see Notes). Specified in meters
         scan_height
             Position of the scan grid in the z-direction. Specified in meters
-        mag_sim_file
+        mm_sim_file
             Path to a magnetization output file from a simulation, e.g. MERRILL vbox file:
                 x y z mx my mz volume
             where the spatial data is scaled in µm
@@ -135,10 +136,10 @@ class MicroDemagSignature(object):
         self.scan_limits = scan_limits
         self.scan_spacing = scan_spacing
         self.scan_height = scan_height
-        if isinstance(self.mag_sim_file, (str, Path)):
-            self.mag_sim_file = mag_sim_file
+        if isinstance(mm_sim_file, (str, Path)):
+            self.mm_sim_file = mm_sim_file
         else:
-            raise TypeError('mag_sim_file must be a str or Path')
+            raise TypeError('mm_sim_file must be a str or Path')
         self.energy_log_file = merrill_energy_log_file
 
         self.Nx = round((scan_limits[1][0] - scan_limits[0][0]) / scan_spacing[0]) + 1
@@ -170,7 +171,6 @@ class MicroDemagSignature(object):
         # print('Mat params:', self.material_parameters)
         self.Ms = mat_params[1]
 
-
     def read_input_files(self, Ms=None, origin_to_geom_center=False,
                          reader='merrill', **reader_kwargs):
         if self.energy_log_file:
@@ -190,7 +190,6 @@ class MicroDemagSignature(object):
                 self.reader_merrill_vbox(self.Ms, origin_to_geom_center, **reader_kwargs)
             case 'fd_micromagnetic':
                 self.reader_fd_micromagnetic(self.Ms, origin_to_geom_center, **reader_kwargs)
-
 
         self.B_grid = np.zeros((self.Ny, self.Nx), dtype=np.float64)
 
@@ -218,7 +217,7 @@ class MicroDemagSignature(object):
 
         # Read the vbox file: TODO: we can use a faster method for large files
         self.mag_data = np.loadtxt(
-            self.mag_sim_file, skiprows=1, ndmin=2, delimiter=vbox_file_delimiter
+            self.mm_sim_file, skiprows=1, ndmin=2, delimiter=vbox_file_delimiter
         )
         # Scale spatial data:
         self.mag_data[:, :3] *= µm
@@ -247,13 +246,12 @@ class MicroDemagSignature(object):
             Ms * self.dip_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
         )
 
-
     def reader_fd_micromagnetic(self,
                                 Ms: float,
                                 origin_to_geom_center: bool,
                                 dV: list,
                                 n: list,
-                                delimiter: Optional[str] = None, 
+                                delimiter: Optional[str] = None,
                                 units: str = 'micrometer') -> None:
         """
         Reads a finite difference micromagnetic file with 6 columns: x y z mx my mz
@@ -269,18 +267,16 @@ class MicroDemagSignature(object):
             to the geometric center of the system, which is computed using all
             coordinates and volumes from the file
         """
-        # if str(self.mag_sim_file).endswith('npy'):  # or use Path's suffix
+        # if str(self.mm_sim_file).endswith('npy'):  # or use Path's suffix
 
-        if str(self.mag_sim_file).endswith(('txt', 'dat')):  # or use Path's suffix
-            self.mag_data = np.loadtxt(self.mag_sim_file, ndmin=2, delimiter=delimiter)
+        if str(self.mm_sim_file).endswith(('txt', 'dat')):  # or use Path's suffix
+            self.mag_data = np.loadtxt(self.mm_sim_file, ndmin=2, delimiter=delimiter)
         else:
-            self.mag_data = np.load(self.mag_sim_file)  # numpy handles io errors
+            self.mag_data = np.load(self.mm_sim_file)  # numpy handles io errors
 
         # Scale spatial data:
         self.mag_data[:, :3] *= scale[units]
-        self.mag_data[:, 6] *= scale[units]**3
 
-        self.dip_volumes = self.mag_data[:, 6]
         # "Unpacking" occurs in the 1st dimension (row) so we transpose
         # The unpacking should generate mem views of the arrays
         self.x, self.y, self.z = self.mag_data[:, :3].T
@@ -288,16 +284,18 @@ class MicroDemagSignature(object):
         self.mx, self.my, self.mz = self.mag_data[:, 3:6].T
 
         # Shift positions wrt to the geometric centre if True
-        self.fd_volume = dV[0] * n[0] + dV[1] * n[1] + dV[2] * n[2]
-        self.fd_cell_volume = dV[0] * dV[1] * dV[2]
+        self.fd_cell_volume = dV[0] * dV[1] * dV[2] * scale[units]**3
+        self.fd_volume = self.fd_cell_volume * n[0] * n[1] * n[2]
         if origin_to_geom_center:
             geom_center = self.r.sum(axis=0)
             geom_center = geom_center * self.fd_cell_volume / self.fd_volume
 
             np.subtract(self.r, geom_center, out=self.r)
 
-        self.dip_moments = Ms * self.fd_cell_volume * self.mag_data[:, 3:6]
+        # print(f'{geom_center=}')
+        print(self.r)
 
+        self.dip_moments = Ms * (self.fd_cell_volume * scale[units]**3) * self.mag_data[:, 3:6]
 
     def compute_scan_signal(self, method="numba", direction_vector=(0.0, 0.0, 1.0)):
         """
