@@ -3,7 +3,7 @@ name = "mmt-micromagnetic-demag-signature"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "numba>=0.64.0",
     "numpy>=2.4.4",
@@ -20,3 +20,4 @@ build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
 cmake.build-type = "Release"
+wheel.packages = ["mmt_micromagnetic_demag_signature"]

@@ -163,7 +163,7 @@ class MicroDemagSignature(object):
 
     def reader_merrill_vbox(self,
                             mm_sim_file: str | Path,
-                            energy_log_file: Optional(str) | Path = None,
+                            energy_log_file: Optional[str] | Path = None,
                             Ms: Optional[float] = None,
                             origin_to_geom_center: bool = False,
                             vbox_file_delimiter=None

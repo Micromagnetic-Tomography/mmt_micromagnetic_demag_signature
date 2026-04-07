@@ -24,4 +24,6 @@ add_custom_command(
 python_add_library(mds_clib MODULE mds_clib.c ${CLIB_DIR}/clib.c WITH_SOABI)
 target_include_directories(mds_clib PRIVATE ${Python_NumPy_INCLUDE_DIRS})  # numpy header files dir
 target_include_directories(mds_clib PRIVATE ${CLIB_DIR})  # Header files in the clib dir
-install(TARGETS mds_clib DESTINATION ${CLIB_DIR})  # just install in same dir
+
+# Use relative path for the built modules
+install(TARGETS mds_clib DESTINATION mmt_micromagnetic_demag_signature/clib)
