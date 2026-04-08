@@ -259,7 +259,7 @@ class MicroDemagSignature(object):
         origin_to_geom_center
             If True, all coordinates of the vbox file are shifted with respect
             to the geometric center of the system, which is computed using all
-            coordinates and volumes from the file
+            coordinates from the file, and the cell volumes based on dx, dy, dz
         dV
             3-element list with the cell dimensions: dx, dy, dz
             Used to compute volume
@@ -270,8 +270,9 @@ class MicroDemagSignature(object):
         units
             Scale units of positions. Usually in nm in micromagnetic codes
         traslation_vector
-            3-element list with translation of coordinates (same scale units
-            than in the file)
+            3-element list with coordinates (same scale units than in the file)
+            to translate center after (if specified) shifting the origin to
+            the geometric center
         """
         # if str(self.mm_sim_file).endswith('npy'):  # or use Path's suffix
 
@@ -281,27 +282,27 @@ class MicroDemagSignature(object):
         else:
             self.mag_data = np.load(mm_sim_file)  # numpy handles io errors
 
+        # Shift positions wrt to the geometric centre if True
+        self.fd_cell_volume = dV[0] * dV[1] * dV[2]
+        self.fd_volume = self.fd_cell_volume * n[0] * n[1] * n[2]
+        if origin_to_geom_center:
+            geom_center = self.r.sum(axis=0)
+            geom_center = geom_center * self.fd_cell_volume / self.fd_volume
+            np.subtract(self.r, geom_center, out=self.r)
+
         # Translate positions if specified
         if traslation_vector:
             self.mag_data[:, :3] -= np.array(traslation_vector)
 
         # Scale spatial data:
         self.mag_data[:, :3] *= scale[units]
+        self.fd_cell_volume *= scale[units]**3
 
         # "Unpacking" occurs in the 1st dimension (row) so we transpose
         # The unpacking should generate mem views of the arrays
         self.x, self.y, self.z = self.mag_data[:, :3].T
         self.r = self.mag_data[:, :3]
         self.mx, self.my, self.mz = self.mag_data[:, 3:6].T
-
-        # Shift positions wrt to the geometric centre if True
-        self.fd_cell_volume = dV[0] * dV[1] * dV[2] * scale[units]**3
-        self.fd_volume = self.fd_cell_volume * n[0] * n[1] * n[2]
-        if origin_to_geom_center:
-            geom_center = self.r.sum(axis=0)
-            geom_center = geom_center * self.fd_cell_volume / self.fd_volume
-
-            np.subtract(self.r, geom_center, out=self.r)
 
         self.dip_moments = Ms * self.fd_cell_volume * self.mag_data[:, 3:6]
 
