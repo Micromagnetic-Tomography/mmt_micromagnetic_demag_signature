@@ -298,7 +298,7 @@ class MicroDemagSignature(object):
 
         # Translate positions if specified
         if traslation_vector:
-            self.mag_data[:, :3] -= np.array(traslation_vector)
+            self.mag_data[:, :3] += np.array(traslation_vector)
 
         # Scale spatial data:
         self.mag_data[:, :3] *= scale[units]
