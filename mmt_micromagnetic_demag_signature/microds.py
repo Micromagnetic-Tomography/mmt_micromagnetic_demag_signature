@@ -282,6 +282,12 @@ class MicroDemagSignature(object):
         else:
             self.mag_data = np.load(mm_sim_file)  # numpy handles io errors
 
+        # "Unpacking" occurs in the 1st dimension (row) so we transpose
+        # The unpacking should generate mem views of the arrays
+        self.x, self.y, self.z = self.mag_data[:, :3].T
+        self.r = self.mag_data[:, :3]
+        self.mx, self.my, self.mz = self.mag_data[:, 3:6].T
+
         # Shift positions wrt to the geometric centre if True
         self.fd_cell_volume = dV[0] * dV[1] * dV[2]
         self.fd_volume = self.fd_cell_volume * n[0] * n[1] * n[2]
@@ -297,12 +303,6 @@ class MicroDemagSignature(object):
         # Scale spatial data:
         self.mag_data[:, :3] *= scale[units]
         self.fd_cell_volume *= scale[units]**3
-
-        # "Unpacking" occurs in the 1st dimension (row) so we transpose
-        # The unpacking should generate mem views of the arrays
-        self.x, self.y, self.z = self.mag_data[:, :3].T
-        self.r = self.mag_data[:, :3]
-        self.mx, self.my, self.mz = self.mag_data[:, 3:6].T
 
         self.dip_moments = Ms * self.fd_cell_volume * self.mag_data[:, 3:6]
 
