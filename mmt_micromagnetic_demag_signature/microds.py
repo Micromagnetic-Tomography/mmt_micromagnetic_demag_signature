@@ -291,14 +291,23 @@ class MicroDemagSignature(object):
         # Shift positions wrt to the geometric centre if True
         self.fd_cell_volume = dV[0] * dV[1] * dV[2]
         self.fd_volume = self.fd_cell_volume * n[0] * n[1] * n[2]
+
+        # Current geometric center
+        self.geom_center = self.r.sum(axis=0)
+        self.geom_center = self.geom_center * self.fd_cell_volume / self.fd_volume
+
         if origin_to_geom_center:
-            geom_center = self.r.sum(axis=0)
-            geom_center = geom_center * self.fd_cell_volume / self.fd_volume
-            np.subtract(self.r, geom_center, out=self.r)
+            np.subtract(self.r, self.geom_center, out=self.r)
+            # Recompute: (should be zero)
+            #
+            self.geom_center = self.r.sum(axis=0)
+            self.geom_center = self.geom_center * self.fd_cell_volume / self.fd_volume
 
         # Translate positions if specified
         if traslation_vector:
-            self.mag_data[:, :3] += np.array(traslation_vector)
+            traslation_vector = np.array(traslation_vector)
+            self.mag_data[:, :3] += traslation_vector
+            np.add(self.geom_center, traslation_vector, out=self.geom_center)
 
         # Scale spatial data:
         self.mag_data[:, :3] *= scale[units]
