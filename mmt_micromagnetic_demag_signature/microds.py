@@ -253,9 +253,7 @@ class MicroDemagSignature(object):
         Parameters
         ----------
         Ms
-            If None, the magnetization is computed using the energy log file
-            specified in the main class. If Ms is passed or self.Ms is
-            specified, use the corresponding value
+            From the micromagnetic simulation (assuming single material)
         origin_to_geom_center
             If True, all coordinates of the vbox file are shifted with respect
             to the geometric center of the system, which is computed using all
@@ -282,13 +280,18 @@ class MicroDemagSignature(object):
         else:
             self.mag_data = np.load(mm_sim_file)  # numpy handles io errors
 
+        # Check and discard points with zero magnetization
+        eps = 1e-4
+        materialCells = np.linalg.norm(self.mag_data[:, 3:6], axis=1) > eps
+        self.mag_data = self.mag_data[materialCells]
+
         # "Unpacking" occurs in the 1st dimension (row) so we transpose
         # The unpacking should generate mem views of the arrays
         self.x, self.y, self.z = self.mag_data[:, :3].T
         self.r = self.mag_data[:, :3]
         self.mx, self.my, self.mz = self.mag_data[:, 3:6].T
 
-        # Shift positions wrt to the geometric centre if True
+        # Compute cell and particle volume (using sites with |m| > 0)
         self.fd_cell_volume = dV[0] * dV[1] * dV[2]
         self.fd_volume = self.fd_cell_volume * n[0] * n[1] * n[2]
 
@@ -296,10 +299,11 @@ class MicroDemagSignature(object):
         self.geom_center = self.r.sum(axis=0)
         self.geom_center = self.geom_center * self.fd_cell_volume / self.fd_volume
 
+        # Shift positions wrt to the geometric centre if True
         if origin_to_geom_center:
             np.subtract(self.r, self.geom_center, out=self.r)
-            # Recompute: (should be zero)
-            #
+
+            # Recompute gc: (should be zero)
             self.geom_center = self.r.sum(axis=0)
             self.geom_center = self.geom_center * self.fd_cell_volume / self.fd_volume
 
@@ -307,6 +311,7 @@ class MicroDemagSignature(object):
         if traslation_vector:
             traslation_vector = np.array(traslation_vector)
             self.mag_data[:, :3] += traslation_vector
+            # Shift geom center
             np.add(self.geom_center, traslation_vector, out=self.geom_center)
 
         # Scale spatial data:
