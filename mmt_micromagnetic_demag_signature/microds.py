@@ -317,6 +317,7 @@ class MicroDemagSignature(object):
         # Scale spatial data:
         self.mag_data[:, :3] *= scale[units]
         self.fd_cell_volume *= scale[units]**3
+        self.fd_volume *= scale[units]**3
 
         self.dip_moments = Ms * self.fd_cell_volume * self.mag_data[:, 3:6]
 
