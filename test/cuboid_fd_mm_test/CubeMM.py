@@ -5,7 +5,6 @@ from mumaxplus.util import plot_field
 import mumaxplus.util.shape as shapes
 from mumaxplus.util.show import show_field_3D
 
-
 nm = 1e-9
 mu0 = 4 * np.pi * 1e-7
 # Material parameters
@@ -21,7 +20,7 @@ nxy = int(lxy / dxy)
 nz = int (lz / dz)
 
 # geometry parameters
-cube = shapes.Cube(lxy).translate(0.0, 0.0, -45e-9)  # -45 nm in z
+cube = shapes.Cube(lxy).translate(lxy/2, lxy/2, lz/2)
 
 # Create the world
 grid_size = (nxy, nxy, nz)
@@ -29,12 +28,10 @@ cell_size = (dxy, dxy, dz)
 world = World(cell_size)
 
 # Ferromagnet
-magnet = Ferromagnet(world, Grid(size=grid_size),
-                     geometry=cube, name="cube_mm")
-magnet.magnetization = (0.0, 0.0, 1.0)
+magnet = Ferromagnet(world, Grid(size=grid_size), geometry=cube, name="cube_mm")
+magnet.magnetization = (1.0, 1.0, -1.0)
 
 # plot_field(magnet.magnetization, arrow_size=8, layer=0)
-
 
 magnet_data = np.array(magnet.magnetization.eval(), dtype=float)
 mesh_data = np.array(magnet.magnetization.meshgrid, dtype=float)  # (3, Nz, Ny, Nx)
