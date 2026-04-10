@@ -242,13 +242,14 @@ class MicroDemagSignature(object):
                                 Ms: float,
                                 origin_to_geom_center: bool,
                                 dV: list[3],
-                                n: list[3],
                                 delimiter: Optional[str] = None,
                                 units: str = 'nanometer',
                                 traslation_vector: Optional[list[3]] = None
                                 ) -> None:
         """
         Reads a finite difference micromagnetic file with 6 columns: x y z mx my mz
+        Sites with zero magnetization are discarded
+        The number of cells is computed from sites with nonvanishing magnetization
 
         Parameters
         ----------
@@ -261,8 +262,6 @@ class MicroDemagSignature(object):
         dV
             3-element list with the cell dimensions: dx, dy, dz
             Used to compute volume
-        n
-            3-element list with the number of cells: nx, ny, nz
         delimiter
             For the text file containing the cell positions and magnetizations
         units
@@ -291,9 +290,10 @@ class MicroDemagSignature(object):
         self.r = self.mag_data[:, :3]
         self.mx, self.my, self.mz = self.mag_data[:, 3:6].T
 
+        self.fd_ncells = self.r.shape[0]
         # Compute cell and particle volume (using sites with |m| > 0)
         self.fd_cell_volume = dV[0] * dV[1] * dV[2]
-        self.fd_volume = self.fd_cell_volume * n[0] * n[1] * n[2]
+        self.fd_volume = self.fd_cell_volume * self.fd_ncells
 
         # Current geometric center
         self.geom_center = self.r.sum(axis=0)
