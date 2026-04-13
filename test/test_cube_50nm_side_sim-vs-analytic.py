@@ -64,7 +64,7 @@ def test_cube_50nm_merrill_vs_analytic():
     print("Rel Error Diff %   :", 100 * relerr)
 
 
-def test_cube_50nm_fdMicromagnetics_vs_analytic():
+def test_cube_50nm_mumaxpMicromagnetics_vs_analytic():
 
     print('** Testing mumax+ finite difference simulation file **')
 
@@ -84,11 +84,13 @@ def test_cube_50nm_fdMicromagnetics_vs_analytic():
     demag_signal.reader_fd_micromagnetic(sim_file,
                                          Ms=4.8e5,
                                          origin_to_geom_center=False,
-                                         dV=[2, 2, 2], n=[25, 25, 25],
+                                         dV=[2, 2, 2],
                                          units='nanometer',
                                          traslation_vector=[0, 0, 0]
                                          )
     demag_signal.compute_scan_signal(method="cython")
+    print(f'{demag_signal.geom_center=}')
+    print(f'{demag_signal.fd_ncells=}')
 
     # -----------------------------------------------------------------------------
 
@@ -114,7 +116,59 @@ def test_cube_50nm_fdMicromagnetics_vs_analytic():
     print("Rel Error Diff %   :", 100 * relerr)
 
 
+def test_cube_50nm_finmagMicromagnetics_vs_analytic():
+
+    print('** Testing finmag finite element simulation file **')
+
+    # Creating scan grid
+    scan_spacing = (10 * nm, 10 * nm)
+    scan_limits = np.array([[-1.5, -1.5], [1.5, 1.5]]) * µm
+    scan_height = 500 * nm
+
+    script_dir = Path(__file__).resolve().parent
+    # FILE_energy = script_dir / "cuboid_merrill_test/cube_sim_energy.log"
+
+    # Notice that the cube in the MERRILL simulation is already centered
+    # at z = -35 nm
+    demag_signal = mds.MicroDemagSignature(scan_limits, scan_spacing, scan_height)
+
+    sim_file = script_dir / "cuboid_finmag_test/finmag_cube_m111.txt"
+    demag_signal.reader_finmag(sim_file,
+                               Ms=4.8e5,
+                               origin_to_geom_center=False,
+                               units='nanometer',
+                               traslation_vector=[0, 0, 0]
+                               )
+    demag_signal.compute_scan_signal(method="cython")
+    print(f'{demag_signal.geom_center=}')
+    print(f'{demag_signal.fe_ntets=}')
+    # print(f'{demag_signal.mesh_volume=}')
+
+    # -----------------------------------------------------------------------------
+
+    # Analytic solution in µT units
+    analytic_sol = np.load(
+        script_dir / "analytical_cuboid_code/cuboid_50nm_centre-at_-35nm_scan-grid_3microm_m_11-1_Bz.npy"
+    )
+
+    # -----------------------------------------------------------------------------
+    # Relative error
+    err = np.linalg.norm(analytic_sol - demag_signal.B_grid * 1e6, ord="fro")
+    relerr = err / np.linalg.norm(analytic_sol, ord="fro")
+
+    # Norm of the simulation with the analytical Bz matrix should be less than:
+    # assert relerr < 1e-4
+
+    print("Max Simulation (µT)  :", np.abs(demag_signal.B_grid).max() * 1e6)
+    print("Max Analytic   (µT)  :", np.abs(analytic_sol).max())
+    print("Max difference (µT):", np.abs(analytic_sol - demag_signal.B_grid * 1e6).max())
+    print("Error Diff (µT)    :", err)
+    print("Rel Error Diff %   :", 100 * relerr)
+
+
 if __name__ == "__main__":
     test_cube_50nm_merrill_vs_analytic()
     print('-' * 80 + '\n')
-    test_cube_50nm_fdMicromagnetics_vs_analytic()
+    test_cube_50nm_mumaxpMicromagnetics_vs_analytic()
+    print('-' * 80 + '\n')
+    test_cube_50nm_finmagMicromagnetics_vs_analytic()

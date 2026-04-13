@@ -20,7 +20,7 @@ tet_vol = df.assemble(v * df.dx)
 # print(np.sum(vols))
 
 sim = finmag.Simulation(mesh, Ms=1e6, unit_length=1e-9)
-sim.m = (1.0, 1.0, 1.0)
+sim.m = (1.0, 1.0, -1.0)
 
 # sim.m is obtained in xxx format: x1 x2 ... y1 y2 ... z1 z2 ...
 # coordinates and vols in nm units

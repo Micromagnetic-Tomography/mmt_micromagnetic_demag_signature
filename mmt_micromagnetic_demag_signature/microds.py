@@ -237,6 +237,92 @@ class MicroDemagSignature(object):
             self.Ms * self.dip_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
         )
 
+    def reader_finmag(self,
+                      mm_sim_file: str | Path,
+                      Ms: float,
+                      origin_to_geom_center: bool,
+                      delimiter: Optional[str] = None,
+                      units: str = 'nanometer',
+                      traslation_vector: Optional[list[3]] = None
+                      ) -> None:
+        """
+        Reads a finite element micromagnetic file produced by the code FinMag
+        The file must contain 6 columns with spin data per mesh node:
+
+            x y z mx my mz cell_volume
+
+        where the cell volume is the effective volume per node averaged using
+        neighboring tetrahedra
+        This reader assumes the magnetization is non-zero in all sites, and that
+        there is a single material
+
+        Parameters
+        ----------
+        Ms
+            From the micromagnetic simulation (assuming single material)
+        origin_to_geom_center
+            If True, all coordinates of the vbox file are shifted with respect
+            to the geometric center of the system, which is computed using all
+            coordinates from the file, and the cell volumes based on dx, dy, dz
+        delimiter
+            For the text file containing the cell positions and magnetizations
+        units
+            Scale units of positions. Usually in nm in micromagnetic codes
+        traslation_vector
+            3-element list with coordinates (same scale units than in the file)
+            to translate center after (if specified) shifting the origin to
+            the geometric center
+        """
+        # TODO: implement for different Ms in mesh, maybe accepting an additional column
+
+        mm_sim_file = Path(mm_sim_file)
+        if mm_sim_file.suffix in ['.txt', '.dat']:
+            self.mag_data = np.loadtxt(mm_sim_file, ndmin=2, delimiter=delimiter)
+        else:
+            self.mag_data = np.load(mm_sim_file)  # numpy handles io errors
+
+        # Check and discard points with zero magnetization
+        # eps = 1e-4
+        # materialCells = np.linalg.norm(self.mag_data[:, 3:6], axis=1) > eps
+        # self.mag_data = self.mag_data[materialCells]
+
+        # "Unpacking" occurs in the 1st dimension (row) so we transpose
+        # The unpacking should generate mem views of the arrays
+        self.x, self.y, self.z = self.mag_data[:, :3].T
+        self.r = self.mag_data[:, :3]
+        self.mx, self.my, self.mz = self.mag_data[:, 3:6].T
+
+        self.fe_ntets = self.r.shape[0]
+        # Compute cell and particle volume
+        self.fe_tet_volumes = self.mag_data[:, 6]
+        self.mesh_volume = np.sum(self.fe_tet_volumes)
+
+        # Current geometric center
+        self.geom_center = self.r * self.fe_tet_volumes[:, np.newaxis]
+        self.geom_center = self.geom_center.sum(axis=0) / self.mesh_volume
+
+        # Shift positions wrt to the geometric centre if True
+        if origin_to_geom_center:
+            np.subtract(self.r, self.geom_center, out=self.r)
+
+            # Recompute gc: (should be zero)
+            self.geom_center = self.r * self.fe_tet_volumes[:, np.newaxis]
+            self.geom_center = self.geom_center.sum(axis=0) / self.mesh_volume
+
+        # Translate positions if specified
+        if traslation_vector:
+            traslation_vector = np.array(traslation_vector)
+            self.mag_data[:, :3] += traslation_vector
+            # Shift geom center
+            np.add(self.geom_center, traslation_vector, out=self.geom_center)
+
+        # Scale spatial data:
+        self.mag_data[:, :3] *= scale[units]
+        self.fe_tet_volumes *= scale[units]**3
+        self.mesh_volume *= scale[units]**3
+
+        self.dip_moments = Ms * self.fe_tet_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
+
     def reader_fd_micromagnetic(self,
                                 mm_sim_file: str | Path,
                                 Ms: float,
@@ -293,11 +379,11 @@ class MicroDemagSignature(object):
         self.fd_ncells = self.r.shape[0]
         # Compute cell and particle volume (using sites with |m| > 0)
         self.fd_cell_volume = dV[0] * dV[1] * dV[2]
-        self.fd_volume = self.fd_cell_volume * self.fd_ncells
+        self.mesh_volume = self.fd_cell_volume * self.fd_ncells
 
         # Current geometric center
         self.geom_center = self.r.sum(axis=0)
-        self.geom_center = self.geom_center * self.fd_cell_volume / self.fd_volume
+        self.geom_center = self.geom_center * self.fd_cell_volume / self.mesh_volume
 
         # Shift positions wrt to the geometric centre if True
         if origin_to_geom_center:
@@ -305,7 +391,7 @@ class MicroDemagSignature(object):
 
             # Recompute gc: (should be zero)
             self.geom_center = self.r.sum(axis=0)
-            self.geom_center = self.geom_center * self.fd_cell_volume / self.fd_volume
+            self.geom_center = self.geom_center * self.fd_cell_volume / self.mesh_volume
 
         # Translate positions if specified
         if traslation_vector:
@@ -317,7 +403,7 @@ class MicroDemagSignature(object):
         # Scale spatial data:
         self.mag_data[:, :3] *= scale[units]
         self.fd_cell_volume *= scale[units]**3
-        self.fd_volume *= scale[units]**3
+        self.mesh_volume *= scale[units]**3
 
         self.dip_moments = Ms * self.fd_cell_volume * self.mag_data[:, 3:6]
 
