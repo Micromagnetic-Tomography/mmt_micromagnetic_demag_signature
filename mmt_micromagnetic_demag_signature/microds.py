@@ -320,6 +320,7 @@ class MicroDemagSignature(object):
         self.mag_data[:, :3] *= scale[units]
         self.fe_tet_volumes *= scale[units]**3
         self.mesh_volume *= scale[units]**3
+        self.geom_center *= scale[units]
 
         self.dip_moments = Ms * self.fe_tet_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
 
