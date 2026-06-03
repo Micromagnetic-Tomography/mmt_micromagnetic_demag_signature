@@ -86,7 +86,7 @@ def dipole_B(dip_r, dip_m, Sx_range, Sy_range, Sheight, B_grid, dir_vector):
     return None
 
 
-@numba_cuda.jit
+@numba_cuda.jit(cache=True)
 def dipole_B_numba_cuda(dip_r, dip_m, Sx_range, Sy_range, Sheight,
                         B_grid, dir_vector):
     """
@@ -110,7 +110,7 @@ def dipole_B_numba_cuda(dip_r, dip_m, Sx_range, Sy_range, Sheight,
         rz = sz - dip_r[k, 2]
 
         rho2 = rx*rx + ry*ry + rz*rz
-        rho  = math.sqrt(rho2)
+        rho = math.sqrt(rho2)
         rho3 = rho2 * rho
         rho5 = rho2 * rho2 * rho
 
@@ -147,7 +147,7 @@ if _HAS_CUPY:
                 double rz = sz - dip_r[3*k + 2];
 
                 double rho2 = rx*rx + ry*ry + rz*rz;
-                double rho  = sqrt(rho2);
+                double rho = sqrt(rho2);
                 double rho3 = rho2 * rho;
                 double rho5 = rho2 * rho2 * rho;
 
@@ -583,12 +583,18 @@ class MicroDemagSignature(object):
                     "working numba.cuda runtime."
                 )
 
-            d_r   = numba_cuda.to_device(np.ascontiguousarray(self.r))
-            d_m   = numba_cuda.to_device(np.ascontiguousarray(self.dip_moments))
-            d_Sx  = numba_cuda.to_device(self.Sx)
-            d_Sy  = numba_cuda.to_device(self.Sy)
+            # Defend against float32 readers: ascontiguousarray(dtype=float64)
+            # is a no-op when the array is already float64 and contiguous, so
+            # this also subsumes the previous ascontiguousarray() calls.
+            r_f64 = np.ascontiguousarray(self.r, dtype=np.float64)
+            m_f64 = np.ascontiguousarray(self.dip_moments, dtype=np.float64)
+
+            d_r = numba_cuda.to_device(r_f64)
+            d_m = numba_cuda.to_device(m_f64)
+            d_Sx = numba_cuda.to_device(self.Sx)
+            d_Sy = numba_cuda.to_device(self.Sy)
             d_dir = numba_cuda.to_device(dir_vector)
-            d_B   = numba_cuda.device_array_like(self.B_grid)
+            d_B = numba_cuda.device_array_like(self.B_grid)
 
             tpb = NUMBA_CUDA_BLOCK
             bpg = ((self.Sx.shape[0] + tpb[0] - 1) // tpb[0],
@@ -604,14 +610,22 @@ class MicroDemagSignature(object):
                 raise ImportError(
                     "method='cupy' requires the `cupy` package to be installed."
                 )
+            if cp.cuda.runtime.getDeviceCount() == 0:
+                raise RuntimeError(
+                    "method='cupy' requires a CUDA-capable GPU; cupy is "
+                    "installed but no CUDA device is visible."
+                )
 
-            dip_r_d = cp.asarray(self.r.ravel())            # (3 * Ndip,)
-            dip_m_d = cp.asarray(self.dip_moments.ravel())  # (3 * Ndip,)
-            dir_d   = cp.asarray(dir_vector)                # (3,)
-            Sx_d    = cp.asarray(self.Sx)                   # (Nx,)
-            Sy_d    = cp.asarray(self.Sy)                   # (Ny,)
-            B_d     = cp.empty((self.Sy.shape[0], self.Sx.shape[0]),
-                               dtype=np.float64)
+            # dtype=np.float64 promotes float32 inputs as part of the H->D
+            # transfer; the cupy ElementwiseKernel signature is float64-only
+            # and would otherwise raise a confusing low-level type error.
+            dip_r_d = cp.asarray(self.r.ravel(), dtype=np.float64)
+            dip_m_d = cp.asarray(self.dip_moments.ravel(), dtype=np.float64)
+            dir_d = cp.asarray(dir_vector, dtype=np.float64)
+            Sx_d = cp.asarray(self.Sx, dtype=np.float64)
+            Sy_d = cp.asarray(self.Sy, dtype=np.float64)
+            B_d = cp.empty((self.Sy.shape[0], self.Sx.shape[0]),
+                           dtype=np.float64)
 
             # Broadcast Sx as (1, Nx) and Sy as (Ny, 1); cupy expands them to
             # (Ny, Nx) to match the output, so each element gets its own
