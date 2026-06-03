@@ -10,11 +10,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# GPU backend for compute_scan_signal(method="cutile"). Requires CUDA 13.x
-# at runtime. For CUDA 12.x systems, install `cupy-cuda12x` manually instead
-# of the cu13 wheel pinned here.
-cutile = [
-    "cuda-tile[tileiras]",
+# GPU backends. method="numba_cuda" only needs numba (already a base dep)
+# plus a working CUDA driver; method="cupy" additionally needs cupy itself.
+# Requires CUDA 13.x at runtime; on CUDA 12.x systems install
+# `cupy-cuda12x` manually instead of the cu13 wheel pinned here.
+gpu = [
     "cupy-cuda13x",
 ]
 

@@ -2,15 +2,15 @@ import math
 import numpy as np
 from pathlib import Path
 import numba
+from numba import cuda as numba_cuda
 from .clib import mds_clib
 from typing import Optional
 
 try:
     import cupy as cp
-    import cuda.tile as ct
-    _HAS_CUTILE = True
+    _HAS_CUPY = True
 except ImportError:
-    _HAS_CUTILE = False
+    _HAS_CUPY = False
 
 
 nm = 1e-9
@@ -20,63 +20,9 @@ scale['micrometer'] = µm
 scale['nanometer'] = nm
 
 
-CUTILE_TILE_X = 16
-CUTILE_TILE_Y = 16
-
-
-if _HAS_CUTILE:
-
-    @ct.kernel
-    def dipole_B_cutile(
-        Sx_range,    # (Nx,)  device array of x scan coordinates
-        Sy_range,    # (Ny,)  device array of y scan coordinates
-        dip_r,       # (Ndipoles, 3)  positions, with scan_height pre-subtracted
-                     # from column 2 so r_z = -dip_r[k, 2]
-        dip_m,       # (Ndipoles, 3)  magnetic moments
-        dir_vec,     # (3,)  normalized projection direction
-        B_grid,      # (Ny, Nx)  output, written in (by, bx) tiles
-        Ndipoles: ct.Constant[int],
-        tile_x:   ct.Constant[int],
-        tile_y:   ct.Constant[int],
-    ):
-        bx = ct.bid(0)
-        by = ct.bid(1)
-
-        # Kernel-arg arrays cannot be subscripted directly; everything goes
-        # through ct.load. Sensor coords and dir_vec are loaded once up front;
-        # each dipole row is loaded as a (1, 3) tile inside the loop and the
-        # scalar components are pulled from that tile.
-        sx = ct.load(Sx_range, index=(bx,), shape=(tile_x,))   # (tile_x,)
-        sy = ct.load(Sy_range, index=(by,), shape=(tile_y,))   # (tile_y,)
-        dv = ct.load(dir_vec,  index=(0,),  shape=(3,))        # (3,)
-
-        acc = ct.zeros(shape=(tile_y, tile_x), dtype=sx.dtype)
-
-        for k in range(Ndipoles):
-            d_r = ct.load(dip_r, index=(k, 0), shape=(1, 3))   # (1, 3)
-            d_m = ct.load(dip_m, index=(k, 0), shape=(1, 3))   # (1, 3)
-
-            rx = sx[None, :] - d_r[0, 0]      # (1, tile_x)
-            ry = sy[:, None] - d_r[0, 1]      # (tile_y, 1)
-            rz = -d_r[0, 2]                   # scalar (Sheight baked in)
-
-            rho2 = rx*rx + ry*ry + rz*rz
-            rho  = ct.sqrt(rho2)
-            rho3 = rho2 * rho
-            rho5 = rho2 * rho2 * rho
-
-            mx = d_m[0, 0]
-            my = d_m[0, 1]
-            mz = d_m[0, 2]
-            mr = mx*rx + my*ry + mz*rz
-
-            Bx = 3e-7 * rx * mr / rho5 - 1e-7 * mx / rho3
-            By = 3e-7 * ry * mr / rho5 - 1e-7 * my / rho3
-            Bz = 3e-7 * rz * mr / rho5 - 1e-7 * mz / rho3
-
-            acc = acc + Bx*dv[0] + By*dv[1] + Bz*dv[2]
-
-        ct.store(B_grid, index=(by, bx), tile=acc)
+# Thread block geometry for the numba.cuda kernel: 16x16 = 256 threads/block,
+# one thread per sensor in the (Sy_range, Sx_range) grid.
+NUMBA_CUDA_BLOCK = (16, 16)
 
 
 # @numba.jit(nopython=True)
@@ -138,6 +84,88 @@ def dipole_B(dip_r, dip_m, Sx_range, Sy_range, Sheight, B_grid, dir_vector):
             )
 
     return None
+
+
+@numba_cuda.jit
+def dipole_B_numba_cuda(dip_r, dip_m, Sx_range, Sy_range, Sheight,
+                        B_grid, dir_vector):
+    """
+    GPU port of `dipole_B`: one thread per sensor point in the (Sx, Sy) scan
+    grid, scalar loop over all dipoles. Same dipole-field formula as the CPU
+    kernel, written line-for-line so the two stay easy to compare.
+    """
+    i, j = numba_cuda.grid(2)
+    if i >= Sx_range.shape[0] or j >= Sy_range.shape[0]:
+        return
+
+    sx = Sx_range[i]
+    sy = Sy_range[j]
+    sz = Sheight
+
+    acc = 0.0
+    Ndipoles = dip_r.shape[0]
+    for k in range(Ndipoles):
+        rx = sx - dip_r[k, 0]
+        ry = sy - dip_r[k, 1]
+        rz = sz - dip_r[k, 2]
+
+        rho2 = rx*rx + ry*ry + rz*rz
+        rho  = math.sqrt(rho2)
+        rho3 = rho2 * rho
+        rho5 = rho2 * rho2 * rho
+
+        mx = dip_m[k, 0]
+        my = dip_m[k, 1]
+        mz = dip_m[k, 2]
+        mr = mx*rx + my*ry + mz*rz
+
+        Bx = 3e-7 * rx * mr / rho5 - 1e-7 * mx / rho3
+        By = 3e-7 * ry * mr / rho5 - 1e-7 * my / rho3
+        Bz = 3e-7 * rz * mr / rho5 - 1e-7 * mz / rho3
+
+        acc += Bx*dir_vector[0] + By*dir_vector[1] + Bz*dir_vector[2]
+
+    B_grid[j, i] = acc
+
+
+if _HAS_CUPY:
+    # cp.ElementwiseKernel: one thread per output sensor; the body is CUDA C
+    # mirroring the CPU kernel one-to-one. `dip_r` / `dip_m` come in flat
+    # (size 3*Ndipoles), so indices are 3*k + {0,1,2}. `sx`, `sy` are
+    # per-element scalars; cupy handles the broadcast against Sx_range and
+    # Sy_range at call time.
+    dipole_B_cupy_kernel = cp.ElementwiseKernel(
+        in_params=('raw float64 dip_r, raw float64 dip_m, '
+                   'raw float64 dir_vec, '
+                   'float64 sx, float64 sy, float64 sz, int32 Ndip'),
+        out_params='float64 B',
+        operation=r'''
+            double acc = 0.0;
+            for (int k = 0; k < Ndip; k++) {
+                double rx = sx - dip_r[3*k + 0];
+                double ry = sy - dip_r[3*k + 1];
+                double rz = sz - dip_r[3*k + 2];
+
+                double rho2 = rx*rx + ry*ry + rz*rz;
+                double rho  = sqrt(rho2);
+                double rho3 = rho2 * rho;
+                double rho5 = rho2 * rho2 * rho;
+
+                double mx = dip_m[3*k + 0];
+                double my = dip_m[3*k + 1];
+                double mz = dip_m[3*k + 2];
+                double mr = mx*rx + my*ry + mz*rz;
+
+                double Bx = 3e-7 * rx * mr / rho5 - 1e-7 * mx / rho3;
+                double By = 3e-7 * ry * mr / rho5 - 1e-7 * my / rho3;
+                double Bz = 3e-7 * rz * mr / rho5 - 1e-7 * mz / rho3;
+
+                acc += Bx*dir_vec[0] + By*dir_vec[1] + Bz*dir_vec[2];
+            }
+            B = acc;
+        ''',
+        name='dipole_B_cupy',
+    )
 
 
 class MicroDemagSignature(object):
@@ -483,11 +511,14 @@ class MicroDemagSignature(object):
         Parameters
         ----------
         method
-            Specify `numba`, `cython`, or `cutile` for the calculations. The C
-            method is parallelized with OpenMP. The `cutile` method runs on the
-            GPU via NVIDIA's cuTile Python API and requires `cupy` and
-            `cuda.tile` to be installed. Results are saved in the `self.B_grid`
-            array.
+            Backend used to evaluate the dipole-field sum. One of:
+              * `numba`       — CPU, numba @njit(parallel=True)
+              * `cython`      — CPU, C/OpenMP via the bundled C library
+              * `numba_cuda`  — GPU, numba.cuda kernel (one thread per sensor)
+              * `cupy`        — GPU, cupy.ElementwiseKernel (one thread per sensor)
+            `numba_cuda` requires a CUDA-capable GPU and numba's CUDA runtime;
+            `cupy` additionally requires the `cupy` package. Results are saved
+            in `self.B_grid`.
         direction_vector
             Vector with the direction of the field to be computed. By default, the
             z-component of the field is used.
@@ -525,41 +556,52 @@ class MicroDemagSignature(object):
                 dir_vector
             )
 
-        elif method == "cutile":
-            if not _HAS_CUTILE:
-                raise ImportError(
-                    "method='cutile' requires `cupy` and `cuda.tile` to be "
-                    "installed."
+        elif method == "numba_cuda":
+            if not numba_cuda.is_available():
+                raise RuntimeError(
+                    "method='numba_cuda' requires a CUDA-capable GPU and a "
+                    "working numba.cuda runtime."
                 )
 
-            Nx, Ny = self.Sx.shape[0], self.Sy.shape[0]
-            # Pad scan-axis ranges up to a multiple of the tile size; padded
-            # lanes compute valid (but discarded) results since 'edge' just
-            # repeats the last real coordinate.
-            pad_x = (-Nx) % CUTILE_TILE_X
-            pad_y = (-Ny) % CUTILE_TILE_Y
-            Sx_p = np.pad(self.Sx, (0, pad_x), mode='edge')
-            Sy_p = np.pad(self.Sy, (0, pad_y), mode='edge')
+            d_r   = numba_cuda.to_device(np.ascontiguousarray(self.r))
+            d_m   = numba_cuda.to_device(np.ascontiguousarray(self.dip_moments))
+            d_Sx  = numba_cuda.to_device(self.Sx)
+            d_Sy  = numba_cuda.to_device(self.Sy)
+            d_dir = numba_cuda.to_device(dir_vector)
+            d_B   = numba_cuda.device_array_like(self.B_grid)
 
-            # Bake scan_height into dipole z positions so the kernel doesn't
-            # need a runtime scalar arg: r_z = Sheight - dip_r_z becomes
-            # r_z = -(dip_r_z - Sheight).
-            dip_r_shifted = self.r.copy()
-            dip_r_shifted[:, 2] -= self.scan_height
+            tpb = NUMBA_CUDA_BLOCK
+            bpg = ((self.Sx.shape[0] + tpb[0] - 1) // tpb[0],
+                   (self.Sy.shape[0] + tpb[1] - 1) // tpb[1])
 
-            Sx_d = cp.asarray(Sx_p)
-            Sy_d = cp.asarray(Sy_p)
-            dip_r_d = cp.asarray(dip_r_shifted)
-            dip_m_d = cp.asarray(self.dip_moments)
-            dir_d   = cp.asarray(dir_vector)
-            B_d     = cp.zeros((Ny + pad_y, Nx + pad_x), dtype=np.float64)
+            dipole_B_numba_cuda[bpg, tpb](
+                d_r, d_m, d_Sx, d_Sy, float(self.scan_height), d_B, d_dir,
+            )
+            d_B.copy_to_host(self.B_grid)
 
-            grid = (ct.cdiv(Nx + pad_x, CUTILE_TILE_X),
-                    ct.cdiv(Ny + pad_y, CUTILE_TILE_Y), 1)
-            ct.launch(
-                cp.cuda.get_current_stream(), grid, dipole_B_cutile,
-                (Sx_d, Sy_d, dip_r_d, dip_m_d, dir_d, B_d,
-                 dip_r_d.shape[0], CUTILE_TILE_X, CUTILE_TILE_Y),
+        elif method == "cupy":
+            if not _HAS_CUPY:
+                raise ImportError(
+                    "method='cupy' requires the `cupy` package to be installed."
+                )
+
+            dip_r_d = cp.asarray(self.r.ravel())            # (3 * Ndip,)
+            dip_m_d = cp.asarray(self.dip_moments.ravel())  # (3 * Ndip,)
+            dir_d   = cp.asarray(dir_vector)                # (3,)
+            Sx_d    = cp.asarray(self.Sx)                   # (Nx,)
+            Sy_d    = cp.asarray(self.Sy)                   # (Ny,)
+            B_d     = cp.empty((self.Sy.shape[0], self.Sx.shape[0]),
+                               dtype=np.float64)
+
+            # Broadcast Sx as (1, Nx) and Sy as (Ny, 1); cupy expands them to
+            # (Ny, Nx) to match the output, so each element gets its own
+            # (sx, sy) pair.
+            dipole_B_cupy_kernel(
+                dip_r_d, dip_m_d, dir_d,
+                Sx_d[None, :], Sy_d[:, None],
+                np.float64(self.scan_height),
+                np.int32(self.r.shape[0]),
+                B_d,
             )
 
-            self.B_grid[:] = cp.asnumpy(B_d[:Ny, :Nx])
+            self.B_grid[:] = cp.asnumpy(B_d)
