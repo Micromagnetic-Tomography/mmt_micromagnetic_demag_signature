@@ -1,8 +1,16 @@
+import math
 import numpy as np
 from pathlib import Path
 import numba
 from .clib import mds_clib
 from typing import Optional
+
+try:
+    import cupy as cp
+    import cuda.tile as ct
+    _HAS_CUTILE = True
+except ImportError:
+    _HAS_CUTILE = False
 
 
 nm = 1e-9
@@ -10,6 +18,57 @@ nm = 1e-9
 scale = {}
 scale['micrometer'] = µm
 scale['nanometer'] = nm
+
+
+CUTILE_TILE_X = 16
+CUTILE_TILE_Y = 16
+
+
+if _HAS_CUTILE:
+
+    @ct.kernel
+    def dipole_B_cutile(
+        Sx_range,    # (Nx,)  device array of x scan coordinates
+        Sy_range,    # (Ny,)  device array of y scan coordinates
+        dip_r,       # (Ndipoles, 3)  positions, with scan_height pre-subtracted
+                     # from column 2 so r_z = -dip_r[k, 2]
+        dip_m,       # (Ndipoles, 3)  magnetic moments
+        dir_vec,     # (3,)  normalized projection direction
+        B_grid,      # (Ny, Nx)  output, written in (by, bx) tiles
+        Ndipoles: ct.Constant[int],
+        tile_x:   ct.Constant[int],
+        tile_y:   ct.Constant[int],
+    ):
+        bx = ct.bid(0)
+        by = ct.bid(1)
+
+        sx = ct.load(Sx_range, index=(bx,), shape=(tile_x,))   # (tile_x,)
+        sy = ct.load(Sy_range, index=(by,), shape=(tile_y,))   # (tile_y,)
+
+        acc = ct.zeros(shape=(tile_y, tile_x), dtype=sx.dtype)
+
+        for k in range(Ndipoles):
+            rx = sx[None, :] - dip_r[k, 0]      # (1, tile_x)
+            ry = sy[:, None] - dip_r[k, 1]      # (tile_y, 1)
+            rz = -dip_r[k, 2]                   # scalar (Sheight baked in)
+
+            rho2 = rx*rx + ry*ry + rz*rz
+            rho  = ct.sqrt(rho2)
+            rho3 = rho2 * rho
+            rho5 = rho2 * rho2 * rho
+
+            mx = dip_m[k, 0]
+            my = dip_m[k, 1]
+            mz = dip_m[k, 2]
+            mr = mx*rx + my*ry + mz*rz
+
+            Bx = 3e-7 * rx * mr / rho5 - 1e-7 * mx / rho3
+            By = 3e-7 * ry * mr / rho5 - 1e-7 * my / rho3
+            Bz = 3e-7 * rz * mr / rho5 - 1e-7 * mz / rho3
+
+            acc = acc + Bx*dir_vec[0] + By*dir_vec[1] + Bz*dir_vec[2]
+
+        ct.store(B_grid, index=(by, bx), tile=acc)
 
 
 # @numba.jit(nopython=True)
@@ -405,6 +464,7 @@ class MicroDemagSignature(object):
         self.mag_data[:, :3] *= scale[units]
         self.fd_cell_volume *= scale[units]**3
         self.mesh_volume *= scale[units]**3
+        self.geom_center *= scale[units]
 
         self.dip_moments = Ms * self.fd_cell_volume * self.mag_data[:, 3:6]
 
@@ -415,8 +475,10 @@ class MicroDemagSignature(object):
         Parameters
         ----------
         method
-            Specify `numba` or `cython` for the calculations. The C method is
-            parallelized with OpenMP. Results are saved in the `self.B_grid`
+            Specify `numba`, `cython`, or `cutile` for the calculations. The C
+            method is parallelized with OpenMP. The `cutile` method runs on the
+            GPU via NVIDIA's cuTile Python API and requires `cupy` and
+            `cuda.tile` to be installed. Results are saved in the `self.B_grid`
             array.
         direction_vector
             Vector with the direction of the field to be computed. By default, the
@@ -454,3 +516,42 @@ class MicroDemagSignature(object):
                 self.B_grid,
                 dir_vector
             )
+
+        elif method == "cutile":
+            if not _HAS_CUTILE:
+                raise ImportError(
+                    "method='cutile' requires `cupy` and `cuda.tile` to be "
+                    "installed."
+                )
+
+            Nx, Ny = self.Sx.shape[0], self.Sy.shape[0]
+            # Pad scan-axis ranges up to a multiple of the tile size; padded
+            # lanes compute valid (but discarded) results since 'edge' just
+            # repeats the last real coordinate.
+            pad_x = (-Nx) % CUTILE_TILE_X
+            pad_y = (-Ny) % CUTILE_TILE_Y
+            Sx_p = np.pad(self.Sx, (0, pad_x), mode='edge')
+            Sy_p = np.pad(self.Sy, (0, pad_y), mode='edge')
+
+            # Bake scan_height into dipole z positions so the kernel doesn't
+            # need a runtime scalar arg: r_z = Sheight - dip_r_z becomes
+            # r_z = -(dip_r_z - Sheight).
+            dip_r_shifted = self.r.copy()
+            dip_r_shifted[:, 2] -= self.scan_height
+
+            Sx_d = cp.asarray(Sx_p)
+            Sy_d = cp.asarray(Sy_p)
+            dip_r_d = cp.asarray(dip_r_shifted)
+            dip_m_d = cp.asarray(self.dip_moments)
+            dir_d   = cp.asarray(dir_vector)
+            B_d     = cp.zeros((Ny + pad_y, Nx + pad_x), dtype=np.float64)
+
+            grid = (ct.cdiv(Nx + pad_x, CUTILE_TILE_X),
+                    ct.cdiv(Ny + pad_y, CUTILE_TILE_Y), 1)
+            ct.launch(
+                cp.cuda.get_current_stream(), grid, dipole_B_cutile,
+                (Sx_d, Sy_d, dip_r_d, dip_m_d, dir_d, B_d,
+                 dip_r_d.shape[0], CUTILE_TILE_X, CUTILE_TILE_Y),
+            )
+
+            self.B_grid[:] = cp.asnumpy(B_d[:Ny, :Nx])
