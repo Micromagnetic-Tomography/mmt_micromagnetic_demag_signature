@@ -1,3 +1,4 @@
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 # import json
 # import collections
 import mmt_micromagnetic_demag_signature as mds
+from mmt_micromagnetic_demag_signature.microds import _HAS_CUPY, numba_cuda
 
 µm = 1e-6
 nm = 1e-9
@@ -116,6 +118,79 @@ def test_cube_50nm_mumaxpMicromagnetics_vs_analytic():
     print("Rel Error Diff %   :", 100 * relerr)
 
 
+def test_cube_50nm_mumaxpMicromagnetics_gpu_benchmark():
+    """
+    Same cuboid + scan geometry as the mumax+ test above. For each available
+    GPU backend (`numba_cuda`, `cupy`), cross-check against the numba CPU
+    reference (tight tolerance) and print a wall-time vs. numba CPU.
+
+    Each backend is skipped individually if its runtime isn't available.
+    """
+    print('** GPU backend benchmark vs numba CPU reference **')
+
+    scan_spacing = (10 * nm, 10 * nm)
+    scan_limits = np.array([[-1.5, -1.5], [1.5, 1.5]]) * µm
+    scan_height = 500 * nm
+
+    script_dir = Path(__file__).resolve().parent
+    sim_file = script_dir / "cuboid_fd_mm_test/cube_mumaxPlus_L_50nm_centerAt_-35nm_dxyz_2nm.npy"
+
+    def load_signal():
+        s = mds.MicroDemagSignature(scan_limits, scan_spacing, scan_height)
+        s.reader_fd_micromagnetic(sim_file,
+                                  Ms=4.8e5,
+                                  origin_to_geom_center=False,
+                                  dV=[2, 2, 2],
+                                  units='nanometer',
+                                  traslation_vector=[0, 0, 0])
+        return s
+
+    # CPU reference (also warms up the numba JIT) ----------------------------
+    demag_cpu = load_signal()
+    demag_cpu.compute_scan_signal(method="numba")
+    B_cpu = demag_cpu.B_grid.copy()
+
+    t0 = time.perf_counter()
+    demag_cpu.compute_scan_signal(method="numba")
+    t_numba = time.perf_counter() - t0
+    print(f"numba CPU       : {t_numba*1e3:8.2f} ms   "
+          f"(B range [{B_cpu.min():+.3e}, {B_cpu.max():+.3e}])")
+
+    # ---- numba.cuda --------------------------------------------------------
+    if not numba_cuda.is_available():
+        print("numba_cuda      : SKIP (no CUDA-capable GPU detected)")
+    else:
+        demag = load_signal()
+        demag.compute_scan_signal(method="numba_cuda")   # warm-up
+        B_ncu = demag.B_grid.copy()
+
+        np.testing.assert_allclose(B_ncu, B_cpu, rtol=1e-6, atol=1e-15)
+
+        t0 = time.perf_counter()
+        demag.compute_scan_signal(method="numba_cuda")
+        t_ncu = time.perf_counter() - t0
+        print(f"numba_cuda      : {t_ncu*1e3:8.2f} ms   "
+              f"(x{t_numba/t_ncu:5.1f} vs numba CPU)   "
+              f"max |Δ|={np.abs(B_ncu - B_cpu).max():.2e}")
+
+    # ---- cupy ElementwiseKernel -------------------------------------------
+    if not _HAS_CUPY:
+        print("cupy            : SKIP (cupy not importable)")
+    else:
+        demag = load_signal()
+        demag.compute_scan_signal(method="cupy")         # warm-up (NVRTC compile)
+        B_cup = demag.B_grid.copy()
+
+        np.testing.assert_allclose(B_cup, B_cpu, rtol=1e-6, atol=1e-15)
+
+        t0 = time.perf_counter()
+        demag.compute_scan_signal(method="cupy")
+        t_cup = time.perf_counter() - t0
+        print(f"cupy            : {t_cup*1e3:8.2f} ms   "
+              f"(x{t_numba/t_cup:5.1f} vs numba CPU)   "
+              f"max |Δ|={np.abs(B_cup - B_cpu).max():.2e}")
+
+
 def test_cube_50nm_finmagMicromagnetics_vs_analytic():
 
     print('** Testing finmag finite element simulation file **')
@@ -170,5 +245,7 @@ if __name__ == "__main__":
     test_cube_50nm_merrill_vs_analytic()
     print('-' * 80 + '\n')
     test_cube_50nm_mumaxpMicromagnetics_vs_analytic()
+    print('-' * 80 + '\n')
+    test_cube_50nm_mumaxpMicromagnetics_gpu_benchmark()
     print('-' * 80 + '\n')
     test_cube_50nm_finmagMicromagnetics_vs_analytic()

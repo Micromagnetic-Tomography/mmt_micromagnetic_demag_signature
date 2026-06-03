@@ -1,8 +1,16 @@
+import math
 import numpy as np
 from pathlib import Path
 import numba
+from numba import cuda as numba_cuda
 from .clib import mds_clib
 from typing import Optional
+
+try:
+    import cupy as cp
+    _HAS_CUPY = True
+except ImportError:
+    _HAS_CUPY = False
 
 
 nm = 1e-9
@@ -10,6 +18,11 @@ nm = 1e-9
 scale = {}
 scale['micrometer'] = µm
 scale['nanometer'] = nm
+
+
+# Thread block geometry for the numba.cuda kernel: 16x16 = 256 threads/block,
+# one thread per sensor in the (Sy_range, Sx_range) grid.
+NUMBA_CUDA_BLOCK = (16, 16)
 
 
 # @numba.jit(nopython=True)
@@ -71,6 +84,108 @@ def dipole_B(dip_r, dip_m, Sx_range, Sy_range, Sheight, B_grid, dir_vector):
             )
 
     return None
+
+
+@numba_cuda.jit
+def dipole_B_numba_cuda(dip_r, dip_m, Sx_range, Sy_range, Sheight,
+                        B_grid, dir_vector):
+    """
+    GPU port of `dipole_B`: one thread per sensor point in the (Sx, Sy) scan
+    grid, scalar loop over all dipoles. Same dipole-field formula as the CPU
+    kernel, written line-for-line so the two stay easy to compare.
+    """
+    i, j = numba_cuda.grid(2)
+    if i >= Sx_range.shape[0] or j >= Sy_range.shape[0]:
+        return
+
+    sx = Sx_range[i]
+    sy = Sy_range[j]
+    sz = Sheight
+
+    acc = 0.0
+    Ndipoles = dip_r.shape[0]
+    for k in range(Ndipoles):
+        rx = sx - dip_r[k, 0]
+        ry = sy - dip_r[k, 1]
+        rz = sz - dip_r[k, 2]
+
+        rho2 = rx*rx + ry*ry + rz*rz
+        rho  = math.sqrt(rho2)
+        rho3 = rho2 * rho
+        rho5 = rho2 * rho2 * rho
+
+        mx = dip_m[k, 0]
+        my = dip_m[k, 1]
+        mz = dip_m[k, 2]
+        mr = mx*rx + my*ry + mz*rz
+
+        Bx = 3e-7 * rx * mr / rho5 - 1e-7 * mx / rho3
+        By = 3e-7 * ry * mr / rho5 - 1e-7 * my / rho3
+        Bz = 3e-7 * rz * mr / rho5 - 1e-7 * mz / rho3
+
+        acc += Bx*dir_vector[0] + By*dir_vector[1] + Bz*dir_vector[2]
+
+    B_grid[j, i] = acc
+
+
+if _HAS_CUPY:
+    # cp.ElementwiseKernel: one thread per output sensor; the body is CUDA C
+    # mirroring the CPU kernel one-to-one. `dip_r` / `dip_m` come in flat
+    # (size 3*Ndipoles), so indices are 3*k + {0,1,2}. `sx`, `sy` are
+    # per-element scalars; cupy handles the broadcast against Sx_range and
+    # Sy_range at call time.
+    dipole_B_cupy_kernel = cp.ElementwiseKernel(
+        in_params=('raw float64 dip_r, raw float64 dip_m, '
+                   'raw float64 dir_vec, '
+                   'float64 sx, float64 sy, float64 sz, int32 Ndip'),
+        out_params='float64 B',
+        operation=r'''
+            double acc = 0.0;
+            for (int k = 0; k < Ndip; k++) {
+                double rx = sx - dip_r[3*k + 0];
+                double ry = sy - dip_r[3*k + 1];
+                double rz = sz - dip_r[3*k + 2];
+
+                double rho2 = rx*rx + ry*ry + rz*rz;
+                double rho  = sqrt(rho2);
+                double rho3 = rho2 * rho;
+                double rho5 = rho2 * rho2 * rho;
+
+                double mx = dip_m[3*k + 0];
+                double my = dip_m[3*k + 1];
+                double mz = dip_m[3*k + 2];
+                double mr = mx*rx + my*ry + mz*rz;
+
+                double Bx = 3e-7 * rx * mr / rho5 - 1e-7 * mx / rho3;
+                double By = 3e-7 * ry * mr / rho5 - 1e-7 * my / rho3;
+                double Bz = 3e-7 * rz * mr / rho5 - 1e-7 * mz / rho3;
+
+                acc += Bx*dir_vec[0] + By*dir_vec[1] + Bz*dir_vec[2];
+            }
+            B = acc;
+        ''',
+        name='dipole_B_cupy',
+    )
+
+    # Pre-warm at import time: triggers NVRTC compilation up front so the
+    # first compute_scan_signal(method="cupy") call doesn't pay the cost.
+    # Subsequent Python processes on the same machine hit cupy's on-disk
+    # kernel cache (~/.cupy/kernel_cache) and skip NVRTC entirely. If no GPU
+    # is reachable at import time the warm-up silently skips; the cupy
+    # method branch raises a clear error when actually invoked.
+    try:
+        _wu_dip = cp.zeros(3, dtype=np.float64)
+        _wu_dir = cp.zeros(3, dtype=np.float64)
+        print("Compiling CUDA kernel (cupy)...", flush=True)
+        dipole_B_cupy_kernel(
+            _wu_dip, _wu_dip, _wu_dir,
+            np.float64(0.0), np.float64(0.0), np.float64(0.0),
+            np.int32(0),  # Ndip=0 -> inner loop is a no-op, no math executed
+        )
+        cp.cuda.Stream.null.synchronize()
+        del _wu_dip, _wu_dir
+    except Exception:
+        pass
 
 
 class MicroDemagSignature(object):
@@ -405,6 +520,7 @@ class MicroDemagSignature(object):
         self.mag_data[:, :3] *= scale[units]
         self.fd_cell_volume *= scale[units]**3
         self.mesh_volume *= scale[units]**3
+        self.geom_center *= scale[units]
 
         self.dip_moments = Ms * self.fd_cell_volume * self.mag_data[:, 3:6]
 
@@ -415,9 +531,14 @@ class MicroDemagSignature(object):
         Parameters
         ----------
         method
-            Specify `numba` or `cython` for the calculations. The C method is
-            parallelized with OpenMP. Results are saved in the `self.B_grid`
-            array.
+            Backend used to evaluate the dipole-field sum. One of:
+              * `numba`       — CPU, numba @njit(parallel=True)
+              * `cython`      — CPU, C/OpenMP via the bundled C library
+              * `numba_cuda`  — GPU, numba.cuda kernel (one thread per sensor)
+              * `cupy`        — GPU, cupy.ElementwiseKernel (one thread per sensor)
+            `numba_cuda` requires a CUDA-capable GPU and numba's CUDA runtime;
+            `cupy` additionally requires the `cupy` package. Results are saved
+            in `self.B_grid`.
         direction_vector
             Vector with the direction of the field to be computed. By default, the
             z-component of the field is used.
@@ -454,3 +575,53 @@ class MicroDemagSignature(object):
                 self.B_grid,
                 dir_vector
             )
+
+        elif method == "numba_cuda":
+            if not numba_cuda.is_available():
+                raise RuntimeError(
+                    "method='numba_cuda' requires a CUDA-capable GPU and a "
+                    "working numba.cuda runtime."
+                )
+
+            d_r   = numba_cuda.to_device(np.ascontiguousarray(self.r))
+            d_m   = numba_cuda.to_device(np.ascontiguousarray(self.dip_moments))
+            d_Sx  = numba_cuda.to_device(self.Sx)
+            d_Sy  = numba_cuda.to_device(self.Sy)
+            d_dir = numba_cuda.to_device(dir_vector)
+            d_B   = numba_cuda.device_array_like(self.B_grid)
+
+            tpb = NUMBA_CUDA_BLOCK
+            bpg = ((self.Sx.shape[0] + tpb[0] - 1) // tpb[0],
+                   (self.Sy.shape[0] + tpb[1] - 1) // tpb[1])
+
+            dipole_B_numba_cuda[bpg, tpb](
+                d_r, d_m, d_Sx, d_Sy, float(self.scan_height), d_B, d_dir,
+            )
+            d_B.copy_to_host(self.B_grid)
+
+        elif method == "cupy":
+            if not _HAS_CUPY:
+                raise ImportError(
+                    "method='cupy' requires the `cupy` package to be installed."
+                )
+
+            dip_r_d = cp.asarray(self.r.ravel())            # (3 * Ndip,)
+            dip_m_d = cp.asarray(self.dip_moments.ravel())  # (3 * Ndip,)
+            dir_d   = cp.asarray(dir_vector)                # (3,)
+            Sx_d    = cp.asarray(self.Sx)                   # (Nx,)
+            Sy_d    = cp.asarray(self.Sy)                   # (Ny,)
+            B_d     = cp.empty((self.Sy.shape[0], self.Sx.shape[0]),
+                               dtype=np.float64)
+
+            # Broadcast Sx as (1, Nx) and Sy as (Ny, 1); cupy expands them to
+            # (Ny, Nx) to match the output, so each element gets its own
+            # (sx, sy) pair.
+            dipole_B_cupy_kernel(
+                dip_r_d, dip_m_d, dir_d,
+                Sx_d[None, :], Sy_d[:, None],
+                np.float64(self.scan_height),
+                np.int32(self.r.shape[0]),
+                B_d,
+            )
+
+            self.B_grid[:] = cp.asnumpy(B_d)
