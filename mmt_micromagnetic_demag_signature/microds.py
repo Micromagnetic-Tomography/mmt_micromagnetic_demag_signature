@@ -167,6 +167,26 @@ if _HAS_CUPY:
         name='dipole_B_cupy',
     )
 
+    # Pre-warm at import time: triggers NVRTC compilation up front so the
+    # first compute_scan_signal(method="cupy") call doesn't pay the cost.
+    # Subsequent Python processes on the same machine hit cupy's on-disk
+    # kernel cache (~/.cupy/kernel_cache) and skip NVRTC entirely. If no GPU
+    # is reachable at import time the warm-up silently skips; the cupy
+    # method branch raises a clear error when actually invoked.
+    try:
+        _wu_dip = cp.zeros(3, dtype=np.float64)
+        _wu_dir = cp.zeros(3, dtype=np.float64)
+        print("Compiling CUDA kernel (cupy)...", flush=True)
+        dipole_B_cupy_kernel(
+            _wu_dip, _wu_dip, _wu_dir,
+            np.float64(0.0), np.float64(0.0), np.float64(0.0),
+            np.int32(0),  # Ndip=0 -> inner loop is a no-op, no math executed
+        )
+        cp.cuda.Stream.null.synchronize()
+        del _wu_dip, _wu_dir
+    except Exception:
+        pass
+
 
 class MicroDemagSignature(object):
     def __init__(
