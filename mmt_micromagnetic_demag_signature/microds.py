@@ -42,31 +42,39 @@ if _HAS_CUTILE:
         bx = ct.bid(0)
         by = ct.bid(1)
 
+        # Kernel-arg arrays cannot be subscripted directly; everything goes
+        # through ct.load. Sensor coords and dir_vec are loaded once up front;
+        # each dipole row is loaded as a (1, 3) tile inside the loop and the
+        # scalar components are pulled from that tile.
         sx = ct.load(Sx_range, index=(bx,), shape=(tile_x,))   # (tile_x,)
         sy = ct.load(Sy_range, index=(by,), shape=(tile_y,))   # (tile_y,)
+        dv = ct.load(dir_vec,  index=(0,),  shape=(3,))        # (3,)
 
         acc = ct.zeros(shape=(tile_y, tile_x), dtype=sx.dtype)
 
         for k in range(Ndipoles):
-            rx = sx[None, :] - dip_r[k, 0]      # (1, tile_x)
-            ry = sy[:, None] - dip_r[k, 1]      # (tile_y, 1)
-            rz = -dip_r[k, 2]                   # scalar (Sheight baked in)
+            d_r = ct.load(dip_r, index=(k, 0), shape=(1, 3))   # (1, 3)
+            d_m = ct.load(dip_m, index=(k, 0), shape=(1, 3))   # (1, 3)
+
+            rx = sx[None, :] - d_r[0, 0]      # (1, tile_x)
+            ry = sy[:, None] - d_r[0, 1]      # (tile_y, 1)
+            rz = -d_r[0, 2]                   # scalar (Sheight baked in)
 
             rho2 = rx*rx + ry*ry + rz*rz
             rho  = ct.sqrt(rho2)
             rho3 = rho2 * rho
             rho5 = rho2 * rho2 * rho
 
-            mx = dip_m[k, 0]
-            my = dip_m[k, 1]
-            mz = dip_m[k, 2]
+            mx = d_m[0, 0]
+            my = d_m[0, 1]
+            mz = d_m[0, 2]
             mr = mx*rx + my*ry + mz*rz
 
             Bx = 3e-7 * rx * mr / rho5 - 1e-7 * mx / rho3
             By = 3e-7 * ry * mr / rho5 - 1e-7 * my / rho3
             Bz = 3e-7 * rz * mr / rho5 - 1e-7 * mz / rho3
 
-            acc = acc + Bx*dir_vec[0] + By*dir_vec[1] + Bz*dir_vec[2]
+            acc = acc + Bx*dv[0] + By*dv[1] + Bz*dv[2]
 
         ct.store(B_grid, index=(by, bx), tile=acc)
 
