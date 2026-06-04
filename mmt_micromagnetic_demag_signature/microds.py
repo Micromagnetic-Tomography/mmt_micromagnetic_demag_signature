@@ -90,48 +90,6 @@ def dipole_B(dip_r, dip_m, Sx_range, Sy_range, Sheight, B_grid, dir_vector):
     return None
 
 
-<<<<<<< HEAD
-@numba_cuda.jit(cache=True)
-def dipole_B_numba_cuda(dip_r, dip_m, Sx_range, Sy_range, Sheight,
-                        B_grid, dir_vector):
-    """
-    GPU port of `dipole_B`: one thread per sensor point in the (Sx, Sy) scan
-    grid, scalar loop over all dipoles. Same dipole-field formula as the CPU
-    kernel, written line-for-line so the two stay easy to compare.
-    """
-    i, j = numba_cuda.grid(2)
-    if i >= Sx_range.shape[0] or j >= Sy_range.shape[0]:
-        return
-
-    sx = Sx_range[i]
-    sy = Sy_range[j]
-    sz = Sheight
-
-    acc = 0.0
-    Ndipoles = dip_r.shape[0]
-    for k in range(Ndipoles):
-        rx = sx - dip_r[k, 0]
-        ry = sy - dip_r[k, 1]
-        rz = sz - dip_r[k, 2]
-
-        rho2 = rx*rx + ry*ry + rz*rz
-        rho = math.sqrt(rho2)
-        rho3 = rho2 * rho
-        rho5 = rho2 * rho2 * rho
-
-        mx = dip_m[k, 0]
-        my = dip_m[k, 1]
-        mz = dip_m[k, 2]
-        mr = mx*rx + my*ry + mz*rz
-
-        Bx = 3e-7 * rx * mr / rho5 - 1e-7 * mx / rho3
-        By = 3e-7 * ry * mr / rho5 - 1e-7 * my / rho3
-        Bz = 3e-7 * rz * mr / rho5 - 1e-7 * mz / rho3
-
-        acc += Bx*dir_vector[0] + By*dir_vector[1] + Bz*dir_vector[2]
-
-    B_grid[j, i] = acc
-=======
 @numba_cuda.jit
 def dipole_B_numba_cuda(dip_r, dip_m, Sx_range, Sy_range, Sheight,
                         B_grid, dir_vector):
@@ -217,7 +175,6 @@ def dipole_B_numba_cuda(dip_r, dip_m, Sx_range, Sy_range, Sheight,
 
     if inb:
         B_grid[j, i] = acc
->>>>>>> cutile
 
 
 if _HAS_CUPY:
@@ -232,12 +189,9 @@ if _HAS_CUPY:
                    'float64 sx, float64 sy, float64 sz, int32 Ndip'),
         out_params='float64 B',
         operation=r'''
-<<<<<<< HEAD
-=======
             double dx = dir_vec[0];
             double dy = dir_vec[1];
             double dz = dir_vec[2];
->>>>>>> cutile
             double acc = 0.0;
             for (int k = 0; k < Ndip; k++) {
                 double rx = sx - dip_r[3*k + 0];
@@ -245,36 +199,20 @@ if _HAS_CUPY:
                 double rz = sz - dip_r[3*k + 2];
 
                 double rho2 = rx*rx + ry*ry + rz*rz;
-<<<<<<< HEAD
-                double rho = sqrt(rho2);
-                double rho3 = rho2 * rho;
-                double rho5 = rho2 * rho2 * rho;
-=======
                 double inv_rho  = 1.0 / sqrt(rho2);
                 double inv_rho2 = inv_rho * inv_rho;
                 double inv_rho3 = inv_rho2 * inv_rho;
                 double inv_rho5 = inv_rho3 * inv_rho2;
->>>>>>> cutile
 
                 double mx = dip_m[3*k + 0];
                 double my = dip_m[3*k + 1];
                 double mz = dip_m[3*k + 2];
-<<<<<<< HEAD
-                double mr = mx*rx + my*ry + mz*rz;
-
-                double Bx = 3e-7 * rx * mr / rho5 - 1e-7 * mx / rho3;
-                double By = 3e-7 * ry * mr / rho5 - 1e-7 * my / rho3;
-                double Bz = 3e-7 * rz * mr / rho5 - 1e-7 * mz / rho3;
-
-                acc += Bx*dir_vec[0] + By*dir_vec[1] + Bz*dir_vec[2];
-=======
 
                 double mr  = mx*rx + my*ry + mz*rz;
                 double r_d = rx*dx + ry*dy + rz*dz;
                 double m_d = mx*dx + my*dy + mz*dz;
 
                 acc += 3e-7 * mr * r_d * inv_rho5 - 1e-7 * m_d * inv_rho3;
->>>>>>> cutile
             }
             B = acc;
         ''',
