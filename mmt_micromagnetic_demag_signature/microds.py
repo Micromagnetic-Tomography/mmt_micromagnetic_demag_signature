@@ -23,6 +23,10 @@ scale['nanometer'] = nm
 # Thread block geometry for the numba.cuda kernel: 16x16 = 256 threads/block,
 # one thread per sensor in the (Sy_range, Sx_range) grid.
 NUMBA_CUDA_BLOCK = (16, 16)
+# Dipoles are streamed through shared memory in tiles of this many. We size the
+# tile to the block thread-count so the cooperative load is exactly one dipole
+# per thread per tile (256 here). Shared use = 2 * TILE * 3 * 8 B = 12 KiB/block.
+NUMBA_CUDA_TILE = NUMBA_CUDA_BLOCK[0] * NUMBA_CUDA_BLOCK[1]
 
 
 # @numba.jit(nopython=True)
@@ -90,42 +94,87 @@ def dipole_B(dip_r, dip_m, Sx_range, Sy_range, Sheight, B_grid, dir_vector):
 def dipole_B_numba_cuda(dip_r, dip_m, Sx_range, Sy_range, Sheight,
                         B_grid, dir_vector):
     """
-    GPU port of `dipole_B`: one thread per sensor point in the (Sx, Sy) scan
-    grid, scalar loop over all dipoles. Same dipole-field formula as the CPU
-    kernel, written line-for-line so the two stay easy to compare.
-    """
-    i, j = numba_cuda.grid(2)
-    if i >= Sx_range.shape[0] or j >= Sy_range.shape[0]:
-        return
+    GPU port of `dipole_B`: one thread per sensor in the (Sx, Sy) scan grid.
+    The dipole list is streamed through shared memory in tiles of
+    NUMBA_CUDA_TILE, so each dipole is read from global memory once per *block*
+    instead of once per *thread* (the classic N-body staging). This is what
+    lets the kernel keep scaling once the dipole arrays no longer fit in L2.
 
-    sx = Sx_range[i]
-    sy = Sy_range[j]
+    All arithmetic is float64
+
+    Optimizations:
+      * Project onto `dir_vector` analytically instead of forming (Bx,By,Bz):
+            B.d = 3e-7 (m.r)(r.d)/rho^5 - 1e-7 (m.d)/rho^3
+      * Build all radial powers from a single reciprocal (1 sqrt + 1 divide per
+        dipole) instead of six separate divisions
+    """
+    sh_r = numba_cuda.shared.array((NUMBA_CUDA_TILE, 3), numba.float64)
+    sh_m = numba_cuda.shared.array((NUMBA_CUDA_TILE, 3), numba.float64)
+
+    # get the thread position in the 2D gpu grid (which we set as sensor pos)
+    i, j = numba_cuda.grid(2)
+    # thread index
+    tid = (numba_cuda.threadIdx.y * numba_cuda.blockDim.x + numba_cuda.threadIdx.x)
+
+    # Out-of-range threads must still reach every syncthreads() below (an early
+    # return here would deadlock the staged load), so we flag them and simply
+    # skip the final store.
+    inb = (i < Sx_range.shape[0]) and (j < Sy_range.shape[0])
+    sx = Sx_range[i] if inb else 0.0
+    sy = Sy_range[j] if inb else 0.0
     sz = Sheight
 
+    dx = dir_vector[0]
+    dy = dir_vector[1]
+    dz = dir_vector[2]
+
     acc = 0.0
-    Ndipoles = dip_r.shape[0]
-    for k in range(Ndipoles):
-        rx = sx - dip_r[k, 0]
-        ry = sy - dip_r[k, 1]
-        rz = sz - dip_r[k, 2]
+    Ndip = dip_r.shape[0]
 
-        rho2 = rx*rx + ry*ry + rz*rz
-        rho  = math.sqrt(rho2)
-        rho3 = rho2 * rho
-        rho5 = rho2 * rho2 * rho
+    for base in range(0, Ndip, NUMBA_CUDA_TILE):
+        # Here, each thread loads a dipole r and m, into the tile's shared mem
+        # and wait for all threads until data is loaded
+        k = base + tid
+        if k < Ndip:  # skip non existent dipoles beyond Ndip in last block
+            sh_r[tid, 0] = dip_r[k, 0]
+            sh_r[tid, 1] = dip_r[k, 1]
+            sh_r[tid, 2] = dip_r[k, 2]
+            sh_m[tid, 0] = dip_m[k, 0]
+            sh_m[tid, 1] = dip_m[k, 1]
+            sh_m[tid, 2] = dip_m[k, 2]
+        numba_cuda.syncthreads()
 
-        mx = dip_m[k, 0]
-        my = dip_m[k, 1]
-        mz = dip_m[k, 2]
-        mr = mx*rx + my*ry + mz*rz
+        upper = NUMBA_CUDA_TILE
+        if Ndip - base < NUMBA_CUDA_TILE:
+            upper = Ndip - base
 
-        Bx = 3e-7 * rx * mr / rho5 - 1e-7 * mx / rho3
-        By = 3e-7 * ry * mr / rho5 - 1e-7 * my / rho3
-        Bz = 3e-7 * rz * mr / rho5 - 1e-7 * mz / rho3
+        # Here, each thread computes the B field from the 256 dipole data
+        # in shared memory
+        for t in range(upper):
+            rx = sx - sh_r[t, 0]
+            ry = sy - sh_r[t, 1]
+            rz = sz - sh_r[t, 2]
+            mx = sh_m[t, 0]
+            my = sh_m[t, 1]
+            mz = sh_m[t, 2]
 
-        acc += Bx*dir_vector[0] + By*dir_vector[1] + Bz*dir_vector[2]
+            rho2 = rx*rx + ry*ry + rz*rz
+            inv_rho = 1.0 / math.sqrt(rho2)
+            inv_rho2 = inv_rho * inv_rho
+            inv_rho3 = inv_rho2 * inv_rho
+            inv_rho5 = inv_rho3 * inv_rho2
 
-    B_grid[j, i] = acc
+            mr = mx*rx + my*ry + mz*rz
+            r_d = rx*dx + ry*dy + rz*dz
+            m_d = mx*dx + my*dy + mz*dz
+
+            acc += 3e-7 * mr * r_d * inv_rho5 - 1e-7 * m_d * inv_rho3
+
+        # Guard the shared buffers before the next tile overwrites them.
+        numba_cuda.syncthreads()
+
+    if inb:
+        B_grid[j, i] = acc
 
 
 if _HAS_CUPY:
@@ -140,6 +189,9 @@ if _HAS_CUPY:
                    'float64 sx, float64 sy, float64 sz, int32 Ndip'),
         out_params='float64 B',
         operation=r'''
+            double dx = dir_vec[0];
+            double dy = dir_vec[1];
+            double dz = dir_vec[2];
             double acc = 0.0;
             for (int k = 0; k < Ndip; k++) {
                 double rx = sx - dip_r[3*k + 0];
@@ -147,20 +199,20 @@ if _HAS_CUPY:
                 double rz = sz - dip_r[3*k + 2];
 
                 double rho2 = rx*rx + ry*ry + rz*rz;
-                double rho  = sqrt(rho2);
-                double rho3 = rho2 * rho;
-                double rho5 = rho2 * rho2 * rho;
+                double inv_rho  = 1.0 / sqrt(rho2);
+                double inv_rho2 = inv_rho * inv_rho;
+                double inv_rho3 = inv_rho2 * inv_rho;
+                double inv_rho5 = inv_rho3 * inv_rho2;
 
                 double mx = dip_m[3*k + 0];
                 double my = dip_m[3*k + 1];
                 double mz = dip_m[3*k + 2];
-                double mr = mx*rx + my*ry + mz*rz;
 
-                double Bx = 3e-7 * rx * mr / rho5 - 1e-7 * mx / rho3;
-                double By = 3e-7 * ry * mr / rho5 - 1e-7 * my / rho3;
-                double Bz = 3e-7 * rz * mr / rho5 - 1e-7 * mz / rho3;
+                double mr  = mx*rx + my*ry + mz*rz;
+                double r_d = rx*dx + ry*dy + rz*dz;
+                double m_d = mx*dx + my*dy + mz*dz;
 
-                acc += Bx*dir_vec[0] + By*dir_vec[1] + Bz*dir_vec[2];
+                acc += 3e-7 * mr * r_d * inv_rho5 - 1e-7 * m_d * inv_rho3;
             }
             B = acc;
         ''',
@@ -259,6 +311,24 @@ class MicroDemagSignature(object):
         self.Ms = None
         self.B_grid = np.zeros((self.Ny, self.Nx), dtype=np.float64)
 
+        # Lazy caches of the static device-side dipole arrays + output buffer
+        # for the GPU backends. Populated on the first compute_scan_signal
+        # call that uses the corresponding method. Call reset_gpu_cache() to
+        # invalidate them after rerunning a reader (which replaces self.r
+        # and self.dip_moments).
+        self._numba_cuda_cache = None
+        self._cupy_cache = None
+
+    def reset_gpu_cache(self):
+        """
+        Drop any cached GPU-side copies of self.r / self.dip_moments / Sx /
+        Sy / output buffer so the next compute_scan_signal call with a GPU
+        backend re-uploads them. Call this after any operation that mutates
+        the dipole arrays (e.g. re-running a reader on the same instance).
+        """
+        self._numba_cuda_cache = None
+        self._cupy_cache = None
+
     def _read_magnetic_params(self, log_file):
         """
         Reads the saturation magnetization value from the log file of a MERRILL simulation.
@@ -351,6 +421,8 @@ class MicroDemagSignature(object):
         self.dip_moments = (
             self.Ms * self.dip_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
         )
+        # Dipole arrays were just replaced; drop any stale GPU buffers.
+        self.reset_gpu_cache()
 
     def reader_finmag(self,
                       mm_sim_file: str | Path,
@@ -438,6 +510,8 @@ class MicroDemagSignature(object):
         self.geom_center *= scale[units]
 
         self.dip_moments = Ms * self.fe_tet_volumes[:, np.newaxis] * self.mag_data[:, 3:6]
+        # Dipole arrays were just replaced; drop any stale GPU buffers.
+        self.reset_gpu_cache()
 
     def reader_fd_micromagnetic(self,
                                 mm_sim_file: str | Path,
@@ -523,6 +597,8 @@ class MicroDemagSignature(object):
         self.geom_center *= scale[units]
 
         self.dip_moments = Ms * self.fd_cell_volume * self.mag_data[:, 3:6]
+        # Dipole arrays were just replaced; drop any stale GPU buffers.
+        self.reset_gpu_cache()
 
     def compute_scan_signal(self, method="numba", direction_vector=(0.0, 0.0, 1.0)):
         """
@@ -583,21 +659,42 @@ class MicroDemagSignature(object):
                     "working numba.cuda runtime."
                 )
 
-            d_r   = numba_cuda.to_device(np.ascontiguousarray(self.r))
-            d_m   = numba_cuda.to_device(np.ascontiguousarray(self.dip_moments))
-            d_Sx  = numba_cuda.to_device(self.Sx)
-            d_Sy  = numba_cuda.to_device(self.Sy)
-            d_dir = numba_cuda.to_device(dir_vector)
-            d_B   = numba_cuda.device_array_like(self.B_grid)
+            # The dipole arrays, scan axes and output buffer are static across
+            # calls on this instance, so upload them once and cache on
+            # self._numba_cuda_cache. Call reset_gpu_cache() if you re-run a
+            # reader (which replaces self.r / self.dip_moments) on the same
+            # instance. Only dir_vector (3 floats) is re-uploaded per call,
+            # since direction_vector may change between invocations.
+            cache = self._numba_cuda_cache
+            if cache is None:
+                # ascontiguousarray(dtype=float64) is a no-op when the array is
+                # already float64+contiguous, and defends against float32
+                # readers otherwise.
+                r_f64 = np.ascontiguousarray(self.r, dtype=np.float64)
+                m_f64 = np.ascontiguousarray(self.dip_moments, dtype=np.float64)
+                cache = {
+                    "d_r": numba_cuda.to_device(r_f64),
+                    "d_m": numba_cuda.to_device(m_f64),
+                    "d_Sx": numba_cuda.to_device(
+                        np.ascontiguousarray(self.Sx, dtype=np.float64)),
+                    "d_Sy": numba_cuda.to_device(
+                        np.ascontiguousarray(self.Sy, dtype=np.float64)),
+                    "d_B": numba_cuda.device_array_like(self.B_grid),
+                }
+                self._numba_cuda_cache = cache
+
+            d_dir = numba_cuda.to_device(
+                np.ascontiguousarray(dir_vector, dtype=np.float64))
 
             tpb = NUMBA_CUDA_BLOCK
             bpg = ((self.Sx.shape[0] + tpb[0] - 1) // tpb[0],
                    (self.Sy.shape[0] + tpb[1] - 1) // tpb[1])
 
             dipole_B_numba_cuda[bpg, tpb](
-                d_r, d_m, d_Sx, d_Sy, float(self.scan_height), d_B, d_dir,
+                cache["d_r"], cache["d_m"], cache["d_Sx"], cache["d_Sy"],
+                float(self.scan_height), cache["d_B"], d_dir,
             )
-            d_B.copy_to_host(self.B_grid)
+            cache["d_B"].copy_to_host(self.B_grid)
 
         elif method == "cupy":
             if not _HAS_CUPY:
@@ -605,23 +702,32 @@ class MicroDemagSignature(object):
                     "method='cupy' requires the `cupy` package to be installed."
                 )
 
-            dip_r_d = cp.asarray(self.r.ravel())            # (3 * Ndip,)
-            dip_m_d = cp.asarray(self.dip_moments.ravel())  # (3 * Ndip,)
-            dir_d   = cp.asarray(dir_vector)                # (3,)
-            Sx_d    = cp.asarray(self.Sx)                   # (Nx,)
-            Sy_d    = cp.asarray(self.Sy)                   # (Ny,)
-            B_d     = cp.empty((self.Sy.shape[0], self.Sx.shape[0]),
-                               dtype=np.float64)
+            # Static device arrays cached on self._cupy_cache (see the
+            # numba_cuda branch above and reset_gpu_cache()). Sx/Sy are stored
+            # pre-broadcast to (1, Nx) / (Ny, 1) so cupy expands them to
+            # (Ny, Nx) against the output, giving each element its own
+            # (sx, sy). dtype=float64 also promotes any float32 reader input.
+            cache = self._cupy_cache
+            if cache is None:
+                cache = {
+                    "dip_r": cp.asarray(self.r.ravel(), dtype=np.float64),
+                    "dip_m": cp.asarray(self.dip_moments.ravel(),
+                                        dtype=np.float64),
+                    "Sx": cp.asarray(self.Sx, dtype=np.float64)[None, :],
+                    "Sy": cp.asarray(self.Sy, dtype=np.float64)[:, None],
+                    "B": cp.empty((self.Sy.shape[0], self.Sx.shape[0]),
+                                  dtype=np.float64),
+                }
+                self._cupy_cache = cache
 
-            # Broadcast Sx as (1, Nx) and Sy as (Ny, 1); cupy expands them to
-            # (Ny, Nx) to match the output, so each element gets its own
-            # (sx, sy) pair.
+            dir_d = cp.asarray(dir_vector, dtype=np.float64)
+
             dipole_B_cupy_kernel(
-                dip_r_d, dip_m_d, dir_d,
-                Sx_d[None, :], Sy_d[:, None],
+                cache["dip_r"], cache["dip_m"], dir_d,
+                cache["Sx"], cache["Sy"],
                 np.float64(self.scan_height),
                 np.int32(self.r.shape[0]),
-                B_d,
+                cache["B"],
             )
 
-            self.B_grid[:] = cp.asnumpy(B_d)
+            self.B_grid[:] = cp.asnumpy(cache["B"])
