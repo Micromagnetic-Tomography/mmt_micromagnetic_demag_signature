@@ -56,14 +56,14 @@ def vs_reference(B, B_ref):
     return absd.max(), (absd / scale).max()
 
 
-def time_method(demag, method, repeats=3):
+def time_method(demag, method, precision='fp64', repeats=3):
     """Warm up (builds the cached device buffers + JIT/NVRTC), then time."""
     demag.compute_scan_signal(method=method)          # warm-up, not timed
     B = demag.B_grid.copy()
     best = float("inf")
     for _ in range(repeats):
         t0 = time.perf_counter()
-        demag.compute_scan_signal(method=method)
+        demag.compute_scan_signal(method=method, precision=precision)
         best = min(best, time.perf_counter() - t0)
     return B, best
 
@@ -86,7 +86,10 @@ def main():
     else:
         demag = load_signal()
         B_ncu, t_ncu = time_method(demag, "numba_cuda")
-        rows.append(("numba_cuda", B_ncu, t_ncu))
+        rows.append(("numba_cuda_fp64", B_ncu, t_ncu))
+
+        B_ncu, t_ncu = time_method(demag, "numba_cuda", precision="fp32")
+        rows.append(("numba_cuda_fp32", B_ncu, t_ncu))
 
     # ---- cupy ---------------------------------------------------------------
     if not _HAS_CUPY:
@@ -94,7 +97,10 @@ def main():
     else:
         demag = load_signal()
         B_cup, t_cup = time_method(demag, "cupy")
-        rows.append(("cupy", B_cup, t_cup))
+        rows.append(("cupy_fp64", B_cup, t_cup))
+
+        B_ncu, t_cup = time_method(demag, "cupy", precision="fp32")
+        rows.append(("cupy_fp32", B_ncu, t_cup))
 
     # ---- report -------------------------------------------------------------
     hdr = f"{'backend':<16}{'relerr_analytic':>18}{'maxΔ_vs_CPU':>16}" \

@@ -90,7 +90,7 @@ def dipole_B(dip_r, dip_m, Sx_range, Sy_range, Sheight, B_grid, dir_vector):
     return None
 
 
-@numba_cuda.jit
+@numba_cuda.jit(cache=True)
 def dipole_B_numba_cuda(dip_r, dip_m, Sx_range, Sy_range, Sheight,
                         B_grid, dir_vector):
     """
@@ -177,42 +177,155 @@ def dipole_B_numba_cuda(dip_r, dip_m, Sx_range, Sy_range, Sheight,
         B_grid[j, i] = acc
 
 
+@numba_cuda.jit(cache=True)
+def dipole_B_numba_cuda_fp32(dip_r, dip_m, Sx_range, Sy_range, Sheight,
+                             B_grid, dir_vector):
+    """
+    Mixed-precision twin of `dipole_B_numba_cuda`: every per-dipole quantity is
+    float32 (full-rate on consumer GPUs, where FP64 runs at 1/64), while the
+    running sum `acc` stays float64 to protect the cancellation that carries
+    the quadrupole/octupole structure. `dip_r`, `dip_m`, `Sx_range`,
+    `Sy_range`, `dir_vector` and `Sheight` are expected as float32; `B_grid`
+    stays float64.
+
+    Structure (tiling, syncthreads, analytic dir projection, single reciprocal)
+    is identical to the FP64 kernel — only the working dtype differs.
+
+    Note: this relies on numba lowering `math.sqrt(float32)` to `sqrtf`. If
+    profiling shows the sqrt still running on the FP64 units, swap the
+    `inv_rho` line for `numba.cuda.libdevice.rsqrtf(rho2)` (which also drops
+    the divide). If the typing ever falls back to float64 the result is still
+    correct — only the speedup is lost.
+    """
+    f32 = numba.float32
+    sh_r = numba_cuda.shared.array((NUMBA_CUDA_TILE, 3), numba.float32)
+    sh_m = numba_cuda.shared.array((NUMBA_CUDA_TILE, 3), numba.float32)
+
+    i, j = numba_cuda.grid(2)
+    tid = (numba_cuda.threadIdx.y * numba_cuda.blockDim.x + numba_cuda.threadIdx.x)
+
+    inb = (i < Sx_range.shape[0]) and (j < Sy_range.shape[0])
+    sx = Sx_range[i] if inb else f32(0.0)
+    sy = Sy_range[j] if inb else f32(0.0)
+    sz = Sheight
+
+    dx = dir_vector[0]
+    dy = dir_vector[1]
+    dz = dir_vector[2]
+
+    acc = 0.0  # float64 accumulator (the += promotes the f32 term to f64)
+    Ndip = dip_r.shape[0]
+
+    for base in range(0, Ndip, NUMBA_CUDA_TILE):
+        k = base + tid
+        if k < Ndip:
+            sh_r[tid, 0] = dip_r[k, 0]
+            sh_r[tid, 1] = dip_r[k, 1]
+            sh_r[tid, 2] = dip_r[k, 2]
+            sh_m[tid, 0] = dip_m[k, 0]
+            sh_m[tid, 1] = dip_m[k, 1]
+            sh_m[tid, 2] = dip_m[k, 2]
+        numba_cuda.syncthreads()
+
+        upper = NUMBA_CUDA_TILE
+        if Ndip - base < NUMBA_CUDA_TILE:
+            upper = Ndip - base
+
+        for t in range(upper):
+            rx = sx - sh_r[t, 0]
+            ry = sy - sh_r[t, 1]
+            rz = sz - sh_r[t, 2]
+            mx = sh_m[t, 0]
+            my = sh_m[t, 1]
+            mz = sh_m[t, 2]
+
+            rho2 = rx*rx + ry*ry + rz*rz
+            inv_rho = numba_cuda.libdevice.rsqrtf(rho2)
+            inv_rho2 = inv_rho * inv_rho
+            inv_rho3 = inv_rho2 * inv_rho
+            inv_rho5 = inv_rho3 * inv_rho2
+
+            mr = mx*rx + my*ry + mz*rz
+            r_d = rx*dx + ry*dy + rz*dz
+            m_d = mx*dx + my*dy + mz*dz
+
+            acc += f32(3e-7) * mr * r_d * inv_rho5 - f32(1e-7) * m_d * inv_rho3
+
+        numba_cuda.syncthreads()
+
+    if inb:
+        B_grid[j, i] = acc
+
+
+# NOTE: Verbose warning for this dummy launch due to low gpu occupancy
+# We might restore this Numba message if we remove the warning
+#
+# # Pre-warm both numba.cuda kernels at import: a 1x1 dummy launch of each
+# # precision triggers JIT compilation up front so the first
+# # compute_scan_signal(method="numba_cuda") call doesn't pay it. With
+# # cache=True on the kernels, the compiled code is written to numba's on-disk
+# # cache, so subsequent Python processes load it and skip recompilation —
+# # mirroring cupy's ~/.cupy/kernel_cache behaviour. Guarded by is_available()
+# # plus try/except so a machine with no CUDA device just skips silently (the
+# # numba_cuda method branch raises a clear error when actually invoked).
+# if numba_cuda.is_available():
+#     try:
+#         print("Compiling CUDA kernel (numba)...", flush=True)
+#         for _dt, _kern in ((np.float64, dipole_B_numba_cuda),
+#                             (np.float32, dipole_B_numba_cuda_fp32)):
+#             # One dipole at the origin, one sensor at z=1.0 -> rho2 = 1.0
+#             # (no divide-by-zero in the warm-up launch).
+#             _r = numba_cuda.to_device(np.zeros((1, 3), dtype=_dt))
+#             _m = numba_cuda.to_device(np.zeros((1, 3), dtype=_dt))
+#             _sx = numba_cuda.to_device(np.zeros(1, dtype=_dt))
+#             _sy = numba_cuda.to_device(np.zeros(1, dtype=_dt))
+#             _dir = numba_cuda.to_device(np.zeros(3, dtype=_dt))
+#             _B = numba_cuda.device_array((1, 1), dtype=np.float64)
+#             _kern[(1, 1), NUMBA_CUDA_BLOCK](
+#                 _r, _m, _sx, _sy, _dt(1.0), _B, _dir)
+#         numba_cuda.synchronize()
+#         del _r, _m, _sx, _sy, _dir, _B
+#     except Exception:
+#         pass
+
+
 if _HAS_CUPY:
     # cp.ElementwiseKernel: one thread per output sensor; the body is CUDA C
     # mirroring the CPU kernel one-to-one. `dip_r` / `dip_m` come in flat
     # (size 3*Ndipoles), so indices are 3*k + {0,1,2}. `sx`, `sy` are
     # per-element scalars; cupy handles the broadcast against Sx_range and
     # Sy_range at call time.
+    # Types T are adapted from the input types
     dipole_B_cupy_kernel = cp.ElementwiseKernel(
-        in_params=('raw float64 dip_r, raw float64 dip_m, '
-                   'raw float64 dir_vec, '
-                   'float64 sx, float64 sy, float64 sz, int32 Ndip'),
+        in_params=('raw T dip_r, raw T dip_m, '
+                   'raw T dir_vec, '
+                   'T sx, T sy, T sz, int32 Ndip'),
         out_params='float64 B',
         operation=r'''
-            double dx = dir_vec[0];
-            double dy = dir_vec[1];
-            double dz = dir_vec[2];
+            T dx = dir_vec[0];
+            T dy = dir_vec[1];
+            T dz = dir_vec[2];
             double acc = 0.0;
             for (int k = 0; k < Ndip; k++) {
-                double rx = sx - dip_r[3*k + 0];
-                double ry = sy - dip_r[3*k + 1];
-                double rz = sz - dip_r[3*k + 2];
+                T rx = sx - dip_r[3*k + 0];
+                T ry = sy - dip_r[3*k + 1];
+                T rz = sz - dip_r[3*k + 2];
 
-                double rho2 = rx*rx + ry*ry + rz*rz;
-                double inv_rho  = 1.0 / sqrt(rho2);
-                double inv_rho2 = inv_rho * inv_rho;
-                double inv_rho3 = inv_rho2 * inv_rho;
-                double inv_rho5 = inv_rho3 * inv_rho2;
+                T rho2 = rx*rx + ry*ry + rz*rz;
+                T inv_rho  = (T)1.0 / sqrt(rho2);
+                T inv_rho2 = inv_rho * inv_rho;
+                T inv_rho3 = inv_rho2 * inv_rho;
+                T inv_rho5 = inv_rho3 * inv_rho2;
 
-                double mx = dip_m[3*k + 0];
-                double my = dip_m[3*k + 1];
-                double mz = dip_m[3*k + 2];
+                T mx = dip_m[3*k + 0];
+                T my = dip_m[3*k + 1];
+                T mz = dip_m[3*k + 2];
 
-                double mr  = mx*rx + my*ry + mz*rz;
-                double r_d = rx*dx + ry*dy + rz*dz;
-                double m_d = mx*dx + my*dy + mz*dz;
+                T mr  = mx*rx + my*ry + mz*rz;
+                T r_d = rx*dx + ry*dy + rz*dz;
+                T m_d = mx*dx + my*dy + mz*dz;
 
-                acc += 3e-7 * mr * r_d * inv_rho5 - 1e-7 * m_d * inv_rho3;
+                acc += (double)((T)3e-7 * mr * r_d * inv_rho5 - (T)1e-7 * m_d * inv_rho3);
             }
             B = acc;
         ''',
@@ -234,8 +347,16 @@ if _HAS_CUPY:
             np.float64(0.0), np.float64(0.0), np.float64(0.0),
             np.int32(0),  # Ndip=0 -> inner loop is a no-op, no math executed
         )
+        # Same for the float32 specialization (NVRTC compiles one per dtype).
+        _wu_dip32 = cp.zeros(3, dtype=np.float32)
+        _wu_dir32 = cp.zeros(3, dtype=np.float32)
+        dipole_B_cupy_kernel(
+            _wu_dip32, _wu_dip32, _wu_dir32,
+            np.float32(0.0), np.float32(0.0), np.float32(0.0),
+            np.int32(0),
+        )
         cp.cuda.Stream.null.synchronize()
-        del _wu_dip, _wu_dir
+        del _wu_dip, _wu_dir, _wu_dip32, _wu_dir32
     except Exception:
         pass
 
@@ -600,7 +721,8 @@ class MicroDemagSignature(object):
         # Dipole arrays were just replaced; drop any stale GPU buffers.
         self.reset_gpu_cache()
 
-    def compute_scan_signal(self, method="numba", direction_vector=(0.0, 0.0, 1.0)):
+    def compute_scan_signal(self, method="numba", direction_vector=(0.0, 0.0, 1.0),
+                            precision="fp64"):
         """
         Computes the dipolar signal at the scan surface
 
@@ -618,7 +740,20 @@ class MicroDemagSignature(object):
         direction_vector
             Vector with the direction of the field to be computed. By default, the
             z-component of the field is used.
+        precision
+            Only honoured by the GPU backends (`numba_cuda`, `cupy`); the CPU
+            backends are always float64. One of:
+              * `fp64` — all arithmetic in float64 (default).
+              * `fp32` — per-dipole math in float32 with a float64 accumulator.
+                On consumer GPUs (e.g. RTX 4090, FP64 at 1/64 rate) this is the
+                only way to get a large speedup. The float64 accumulator keeps
+                the cancellation that carries quadrupole/octupole structure; the
+                per-term float32 rounding is ~1e-7 relative. 
+                NOTE: Requires validation against analytic reference.
         """
+        if precision not in ("fp64", "fp32"):
+            raise ValueError("precision must be 'fp64' or 'fp32'")
+        gpu_dtype = np.float32 if precision == "fp32" else np.float64
         # Ensure normalized dir vector
         dir_vector = np.array(direction_vector)
         dv_norm = np.linalg.norm(dir_vector)
@@ -663,35 +798,39 @@ class MicroDemagSignature(object):
             # self._numba_cuda_cache. Call reset_gpu_cache() if you re-run a
             # reader (which replaces self.r / self.dip_moments) on the same
             # instance. Only dir_vector (3 floats) is re-uploaded per call,
-            # since direction_vector may change between invocations.
+            # since direction_vector may change between invocations. The cache
+            # is tagged with its precision and rebuilt if `precision` changes.
             cache = self._numba_cuda_cache
-            if cache is None:
-                # ascontiguousarray(dtype=float64) is a no-op when the array is
-                # already float64+contiguous, and defends against float32
-                # readers otherwise.
-                r_f64 = np.ascontiguousarray(self.r, dtype=np.float64)
-                m_f64 = np.ascontiguousarray(self.dip_moments, dtype=np.float64)
+            if cache is None or cache["precision"] != precision:
+                # ascontiguousarray(dtype=...) is a no-op when the array already
+                # matches, and casts float64<->float32 readers otherwise. The
+                # output buffer stays float64 regardless of `precision`.
+                r_g = np.ascontiguousarray(self.r, dtype=gpu_dtype)
+                m_g = np.ascontiguousarray(self.dip_moments, dtype=gpu_dtype)
                 cache = {
-                    "d_r": numba_cuda.to_device(r_f64),
-                    "d_m": numba_cuda.to_device(m_f64),
+                    "precision": precision,
+                    "d_r": numba_cuda.to_device(r_g),
+                    "d_m": numba_cuda.to_device(m_g),
                     "d_Sx": numba_cuda.to_device(
-                        np.ascontiguousarray(self.Sx, dtype=np.float64)),
+                        np.ascontiguousarray(self.Sx, dtype=gpu_dtype)),
                     "d_Sy": numba_cuda.to_device(
-                        np.ascontiguousarray(self.Sy, dtype=np.float64)),
+                        np.ascontiguousarray(self.Sy, dtype=gpu_dtype)),
                     "d_B": numba_cuda.device_array_like(self.B_grid),
                 }
                 self._numba_cuda_cache = cache
 
             d_dir = numba_cuda.to_device(
-                np.ascontiguousarray(dir_vector, dtype=np.float64))
+                np.ascontiguousarray(dir_vector, dtype=gpu_dtype))
 
             tpb = NUMBA_CUDA_BLOCK
             bpg = ((self.Sx.shape[0] + tpb[0] - 1) // tpb[0],
                    (self.Sy.shape[0] + tpb[1] - 1) // tpb[1])
 
-            dipole_B_numba_cuda[bpg, tpb](
+            kernel = (dipole_B_numba_cuda_fp32 if precision == "fp32"
+                      else dipole_B_numba_cuda)
+            kernel[bpg, tpb](
                 cache["d_r"], cache["d_m"], cache["d_Sx"], cache["d_Sy"],
-                float(self.scan_height), cache["d_B"], d_dir,
+                gpu_dtype(self.scan_height), cache["d_B"], d_dir,
             )
             cache["d_B"].copy_to_host(self.B_grid)
 
@@ -710,26 +849,27 @@ class MicroDemagSignature(object):
             # numba_cuda branch above and reset_gpu_cache()). Sx/Sy are stored
             # pre-broadcast to (1, Nx) / (Ny, 1) so cupy expands them to
             # (Ny, Nx) against the output, giving each element its own
-            # (sx, sy). dtype=float64 also promotes any float32 reader input.
+            # (sx, sy). The cache is tagged with its precision; the templated
+            # kernel resolves T from the input dtype (B stays float64).
             cache = self._cupy_cache
-            if cache is None:
+            if cache is None or cache["precision"] != precision:
                 cache = {
-                    "dip_r": cp.asarray(self.r.ravel(), dtype=np.float64),
+                    "precision": precision,
+                    "dip_r": cp.asarray(self.r.ravel(), dtype=gpu_dtype),
                     "dip_m": cp.asarray(self.dip_moments.ravel(),
-                                        dtype=np.float64),
-                    "Sx": cp.asarray(self.Sx, dtype=np.float64)[None, :],
-                    "Sy": cp.asarray(self.Sy, dtype=np.float64)[:, None],
-                    "B": cp.empty((self.Sy.shape[0], self.Sx.shape[0]),
-                                  dtype=np.float64),
+                                        dtype=gpu_dtype),
+                    "Sx": cp.asarray(self.Sx, dtype=gpu_dtype)[None, :],
+                    "Sy": cp.asarray(self.Sy, dtype=gpu_dtype)[:, None],
+                    "B": cp.empty((self.Sy.shape[0], self.Sx.shape[0]), dtype=np.float64),
                 }
                 self._cupy_cache = cache
 
-            dir_d = cp.asarray(dir_vector, dtype=np.float64)
+            dir_d = cp.asarray(dir_vector, dtype=gpu_dtype)
 
             dipole_B_cupy_kernel(
                 cache["dip_r"], cache["dip_m"], dir_d,
                 cache["Sx"], cache["Sy"],
-                np.float64(self.scan_height),
+                gpu_dtype(self.scan_height),
                 np.int32(self.r.shape[0]),
                 cache["B"],
             )
